@@ -30,6 +30,11 @@ test('config：导出完整配置对象', () => {
   assert.ok(config.defaultUsdtCnyRate > 0);
   assert.equal(typeof config.usdtContract, 'string');
   assert.ok(Number.isInteger(config.addressConcurrency));
+  // 广告配置
+  assert.equal(config.adsEnabled, false);
+  assert.equal(typeof config.adsFile, 'string');
+  assert.equal(typeof config.adEventsFile, 'string');
+  assert.ok(config.adShowRatio >= 0 && config.adShowRatio <= 1);
 });
 
 test('required：缺失时抛错', () => {

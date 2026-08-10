@@ -3,13 +3,21 @@
 const http = require('http');
 const config = require('./config');
 const { Storage } = require('./storage');
+const { AdService } = require('./ad-service');
 const { createBot } = require('./bot');
 const { Logger } = require('./logger');
 
 async function main() {
   const logger = new Logger(config.logLevel);
   const storage = new Storage(config.dataDir, { logger });
-  const bot = createBot(config, storage);
+  const adService = new AdService({
+    adsFile: config.adsFile,
+    eventsFile: config.adEventsFile,
+    logger,
+    enabled: config.adsEnabled,
+    showRatio: config.adShowRatio,
+  });
+  const bot = createBot(config, storage, adService);
 
   // 可选健康检查端口（HEALTH_PORT=0 时不启动）
   let healthServer;

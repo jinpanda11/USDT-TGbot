@@ -1,5 +1,7 @@
 'use strict';
 
+const path = require('path');
+
 require('dotenv').config();
 
 function required(name) {
@@ -74,6 +76,8 @@ module.exports = {
   // 访问控制
   allowedUserIds: readUserIdCsv('ALLOWED_TELEGRAM_USER_IDS'),
   requirePrivateChat: readBool('REQUIRE_PRIVATE_CHAT', true),
+  // 广告管理员（仅这些 ID 可执行 /ad_* 管理命令）
+  adminUserIds: readUserIdCsv('ADMIN_TELEGRAM_USER_IDS'),
   // 查询限流与资源上限
   globalQueryConcurrency: readInt('GLOBAL_QUERY_CONCURRENCY', 2, 1, 20),
   maxQueriesPerUserPerMin: readInt('MAX_QUERIES_PER_USER_PER_MIN', 5, 0, 60),
@@ -84,6 +88,11 @@ module.exports = {
   sessionTtlMs: readInt('SESSION_TTL_MS', 1800000, 60000, 86400000),
   logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),
   healthPort: readInt('HEALTH_PORT', 0, 0, 65535),
+  // 广告（阶段 A：查询结果赞助位）
+  adsEnabled: readBool('ADS_ENABLED', false),
+  adsFile: path.resolve(process.env.ADS_FILE || path.join(dataDir, 'ads.json')),
+  adEventsFile: path.resolve(process.env.AD_EVENTS_FILE || path.join(dataDir, 'ad-events.jsonl')),
+  adShowRatio: readNumber('AD_SHOW_RATIO', 1, 0, 1),
   // 供测试使用的读取工具
   _helpers: { required, readInt, readNumber, readBool, readUserIdCsv },
 };

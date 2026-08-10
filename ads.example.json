@@ -1,0 +1,31 @@
+{
+  "enabled": false,
+  "ads": [
+    {
+      "id": "demo-1",
+      "title": "XXX 钱包",
+      "body": "支持 TRON 多地址管理与资产提醒",
+      "sponsor_name": "XXX 钱包",
+      "button_text": "了解详情",
+      "target_url": "https://example.com/",
+      "status": "approved",
+      "placement": "query_result",
+      "starts_at": "2026-08-10T00:00:00+08:00",
+      "ends_at": "2026-12-31T23:59:59+08:00",
+      "max_impressions": 10000
+    },
+    {
+      "id": "demo-2",
+      "title": "TG 频道赞助",
+      "body": "关注 @MyChannel 获取每日链上机会（纯文字广告，无外链）",
+      "sponsor_name": "@MyChannel",
+      "button_text": "",
+      "target_url": "",
+      "status": "approved",
+      "placement": "query_result",
+      "starts_at": "2026-08-10T00:00:00+08:00",
+      "ends_at": "2026-12-31T23:59:59+08:00",
+      "max_impressions": 0
+    }
+  ]
+}

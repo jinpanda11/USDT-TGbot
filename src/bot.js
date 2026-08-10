@@ -12,6 +12,8 @@ const {
 } = require('./trongrid');
 const { Logger, maskApiKey, maskUserId } = require('./logger');
 const { Semaphore, RateLimiter, QueryCache } = require('./query-gate');
+const { renderText, renderKeyboard } = require('./ad-renderer');
+const { registerAdAdmin } = require('./ad-admin');
 
 // 底部常驻按钮文案
 const BTN = {
@@ -79,7 +81,7 @@ function monthLabel(year, month) {
   return `${year}-${String(month).padStart(2, '0')}`;
 }
 
-function createBot(config, storage) {
+function createBot(config, storage, adService = null) {
   const bot = new Telegraf(config.telegramBotToken);
   const logger = new Logger(config.logLevel);
   const queryingUsers = new Set();
@@ -502,8 +504,37 @@ function createBot(config, storage) {
       text += `\n\n汇率：1 USDT = ${Number(rate).toFixed(4)} 元`;
       if (user.excludeSelf) text += '\n已排除自有地址互转';
 
+      // 查询结果赞助位（阶段 A）：成功/部分成功时追加一条广告
+      let replyText = text;
+      let replyExtra = MAIN_KEYBOARD;
+      let shownAd = null;
+      if (adService && adService.enabled) {
+        try {
+          if (adService.shouldShow()) {
+            const ad = adService.selectAd();
+            if (ad) {
+              replyText = `${text}\n${renderText(ad)}`;
+              replyExtra = { ...MAIN_KEYBOARD, ...renderKeyboard(ad) };
+              shownAd = ad;
+            }
+          }
+        } catch (error) {
+          logger.warn('ad.select.failed', { error: error.message });
+        }
+      }
+
       await editStatus(`查询完成 ${label}`);
-      await ctx.reply(text, MAIN_KEYBOARD);
+      await ctx.reply(replyText, replyExtra);
+
+      // 消息发送成功后才记录曝光（发送失败不虚增曝光量）
+      if (shownAd) {
+        adService.recordImpression(shownAd.id, ctx.from.id);
+        logger.info('ad.impression', {
+          adId: shownAd.id,
+          user: maskUserId(ctx.from.id),
+          source: 'query_result',
+        });
+      }
 
       logger.info('query.completed', {
         user: maskUserId(userId),
@@ -548,6 +579,20 @@ function createBot(config, storage) {
       queryingUsers.delete(userId);
     }
   }
+
+  // 广告管理命令（阶段 C 子集）：/ad_new /ad_list /ad_preview /ad_approve /ad_pause /ad_stats
+  const adAdmin = adService
+    ? registerAdAdmin(bot, {
+        config,
+        adService,
+        logger,
+        setSession,
+        clearSession,
+        replyMain,
+        assertPrivateChat,
+        mainKeyboard: MAIN_KEYBOARD,
+      })
+    : null;
 
   // ---------- 命令（兼容） ----------
   bot.start(async (ctx) => {
@@ -735,6 +780,10 @@ function createBot(config, storage) {
 
     const session = getSession(ctx.from.id);
     if (!session) return next();
+
+    if (session.type === 'ad_new' && adAdmin) {
+      return adAdmin.handleWizardText(ctx, session);
+    }
 
     if (session.type === 'add_address') {
       if (session.step === 'address') {
@@ -943,6 +992,32 @@ function createBot(config, storage) {
     const month = Number.parseInt(ctx.match[2], 10);
     await ctx.answerCbQuery('开始导出...');
     await runQuery(ctx, { year, month, exportCsv: true });
+  });
+
+  // ---------- 广告点击 ----------
+  bot.action(/^ad:click:(.+)$/, async (ctx) => {
+    const adId = ctx.match[1];
+    const ad = adService?.getAdById(adId);
+    if (!ad) {
+      await ctx.answerCbQuery('广告已下线').catch(() => {});
+      return;
+    }
+    if (!ad.targetUrl) {
+      await ctx.answerCbQuery('该广告无外链').catch(() => {});
+      return;
+    }
+    // 回调中只带广告 ID，不携带任何敏感参数
+    adService.recordClick(ad.id, ctx.from.id);
+    logger.info('ad.click', {
+      adId: ad.id,
+      user: maskUserId(ctx.from.id),
+      source: 'query_result',
+    });
+    try {
+      await ctx.answerCbQuery('', { url: ad.targetUrl });
+    } catch {
+      // ignore
+    }
   });
 
   bot.catch((error, ctx) => {
