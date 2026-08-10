@@ -1,5 +1,8 @@
 'use strict';
 
+const crypto = require('crypto');
+const { maskAddress } = require('./logger');
+
 const USDT_SCALE = 1000000n;
 const CHINA_TIME_ZONE = 'Asia/Shanghai';
 const CHINA_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -13,14 +16,72 @@ const CHINA_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
   second: '2-digit',
   hour12: false,
 });
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const TRON_ADDRESS_VERSION = 0x41;
+const MAX_RETRY_AFTER_MS = 15000;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isValidTronAddress(address) {
-  return /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address);
+// ---------- TRON 地址校验（Base58Check + 16 进制形式） ----------
+
+function base58Decode(input) {
+  if (!input) throw new Error('空输入');
+  let value = 0n;
+  for (const char of input) {
+    const index = BASE58_ALPHABET.indexOf(char);
+    if (index === -1) throw new Error(`非法 Base58 字符：${char}`);
+    value = value * 58n + BigInt(index);
+  }
+  const byteLength = Math.ceil(value.toString(16).length / 2) || 1;
+  const bytes = Buffer.alloc(byteLength);
+  let v = value;
+  for (let i = byteLength - 1; i >= 0; i--) {
+    bytes[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  // 前导 '1'（值为 0）需要补 0x00
+  const leadingZeros = (input.match(/^1+/) || [''])[0].length;
+  return Buffer.concat([Buffer.alloc(leadingZeros), bytes]);
 }
+
+function sha256Double(data) {
+  return crypto
+    .createHash('sha256')
+    .update(crypto.createHash('sha256').update(data).digest())
+    .digest();
+}
+
+function isValidTronAddress(address) {
+  if (typeof address !== 'string') return false;
+  const value = address.trim();
+  if (value.length === 0) return false;
+  // 16 进制形式：41 + 40 hex（无校验和）
+  if (/^41[0-9a-fA-F]{40}$/.test(value)) return true;
+  // Base58 形式：T + 33 字符，共 34 位
+  if (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(value)) {
+    try {
+      const decoded = base58Decode(value);
+      if (decoded.length !== 25) return false;
+      if (decoded[0] !== TRON_ADDRESS_VERSION) return false;
+      const payload = decoded.subarray(0, 21);
+      const checksum = decoded.subarray(21);
+      const hash = sha256Double(payload);
+      return (
+        hash[0] === checksum[0] &&
+        hash[1] === checksum[1] &&
+        hash[2] === checksum[2] &&
+        hash[3] === checksum[3]
+      );
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+// ---------- 时间与金额 ----------
 
 function getChinaMonthRange(year, month) {
   const start = Date.UTC(year, month - 1, 1) - CHINA_UTC_OFFSET_MS;
@@ -65,6 +126,8 @@ function csvCell(value) {
   return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
+// ---------- HTTP ----------
+
 async function fetchJson(url, { headers = {}, timeout = 15000, retries = 2 } = {}) {
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -78,6 +141,12 @@ async function fetchJson(url, { headers = {}, timeout = 15000, retries = 2 } = {
       if (!response.ok) {
         const error = new Error(`HTTP ${response.status}`);
         error.status = response.status;
+        if (response.status === 429) {
+          const retryAfter = Number.parseInt(response.headers.get('retry-after') || '', 10);
+          if (Number.isFinite(retryAfter)) {
+            error.retryAfterMs = Math.min(retryAfter * 1000, MAX_RETRY_AFTER_MS);
+          }
+        }
         throw error;
       }
       return await response.json();
@@ -89,7 +158,11 @@ async function fetchJson(url, { headers = {}, timeout = 15000, retries = 2 } = {
       const retryable =
         !Number.isInteger(lastError.status) || lastError.status === 429 || lastError.status >= 500;
       if (attempt === retries || !retryable) throw lastError;
-      await delay(500 * 2 ** attempt + Math.random() * 250);
+      const backoff =
+        lastError.status === 429 && lastError.retryAfterMs
+          ? lastError.retryAfterMs
+          : 500 * 2 ** attempt + Math.random() * 250;
+      await delay(backoff);
     } finally {
       clearTimeout(timeoutId);
     }
@@ -101,8 +174,16 @@ async function fetchAllTransactions(url, apiKey, options = {}) {
   const transactions = [];
   let nextUrl = url;
   const seen = new Set();
+  const maxPages = options.maxPages ?? 100;
+  let pageCount = 0;
+  let truncated = false;
   while (nextUrl && !seen.has(nextUrl)) {
+    if (pageCount >= maxPages) {
+      truncated = true;
+      break;
+    }
     seen.add(nextUrl);
+    pageCount += 1;
     const response = await fetchJson(nextUrl, {
       headers: { 'TRON-PRO-API-KEY': apiKey },
       timeout: options.timeout,
@@ -115,7 +196,7 @@ async function fetchAllTransactions(url, apiKey, options = {}) {
     const next = response?.meta?.links?.next;
     nextUrl = next ? new URL(next, 'https://api.trongrid.io').href : null;
   }
-  return transactions;
+  return { transactions, truncated };
 }
 
 async function mapWithConcurrency(items, limit, worker) {
@@ -130,7 +211,10 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 async function fetchUsdtCnyRate(url, options = {}) {
-  const response = await fetchJson(url, { timeout: options.timeout || 10000, retries: options.retries });
+  const response = await fetchJson(url, {
+    timeout: options.timeout || 10000,
+    retries: options.retries,
+  });
   const rate = Number.parseFloat(response?.tether?.cny);
   if (!Number.isFinite(rate) || rate <= 0) throw new Error('Invalid USDT/CNY rate');
   return rate;
@@ -147,15 +231,32 @@ async function queryMonthIncome({
   concurrency,
   timeout,
   retries,
+  maxPages = 100,
+  maxRecords = 100000,
+  totalTimeoutMs = 0,
   onProgress,
+  logger,
 }) {
   const ownAddresses = new Set(wallets.map((item) => item.address));
   const { start, endExclusive } = getChinaMonthRange(year, month);
+  const contractLower = String(usdtContract).toLowerCase();
   const records = [];
   const errors = [];
+  const warnings = [];
+  const seenKeys = new Set();
+  let deduped = 0;
+  let skipped = 0;
   let completed = 0;
+  let recordLimitReached = false;
+  const deadline = totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : 0;
 
   await mapWithConcurrency(wallets, concurrency, async (wallet) => {
+    if (recordLimitReached || (deadline > 0 && Date.now() > deadline)) {
+      skipped += 1;
+      completed += 1;
+      if (onProgress) onProgress(completed, wallets.length);
+      return;
+    }
     try {
       const params = new URLSearchParams({
         contract_address: usdtContract,
@@ -165,43 +266,92 @@ async function queryMonthIncome({
         min_timestamp: String(start),
         max_timestamp: String(endExclusive - 1),
       });
-      const transactions = await fetchAllTransactions(
+      const { transactions, truncated } = await fetchAllTransactions(
         `${apiBase}${encodeURIComponent(wallet.address)}/transactions/trc20?${params}`,
         apiKey,
-        { timeout, retries }
+        { timeout, retries, maxPages }
       );
+      if (truncated) {
+        warnings.push(`地址 ${maskAddress(wallet.address)} 页数超过 ${maxPages}，结果可能不完整`);
+      }
       transactions.forEach((transaction) => {
-        if (excludeSelf && ownAddresses.has(transaction.from)) return;
-        const timestamp = Number(transaction.block_timestamp);
-        if (!Number.isFinite(timestamp)) return;
+        if (recordLimitReached) return;
+        // 校验合约地址
+        const tokenAddress = String(transaction?.token_info?.address || '').toLowerCase();
+        if (tokenAddress !== contractLower) return;
+        // 校验收款地址（only_to 之外的防御性校验）
+        if (String(transaction?.to || '') !== wallet.address) return;
+        // 校验时间范围
+        const timestamp = Number(transaction?.block_timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < start || timestamp >= endExclusive) return;
+        // 校验金额格式
+        let amountMicros;
         try {
-          const amountMicros = BigInt(transaction.value);
-          if (amountMicros < 0n) return;
-          records.push({
-            label: wallet.label,
-            address: wallet.address,
-            from: String(transaction.from || ''),
-            amountMicros,
-            timestamp,
-            time: CHINA_DATE_TIME_FORMATTER.format(new Date(timestamp)),
-          });
+          amountMicros = BigInt(transaction.value);
         } catch {
-          console.warn('忽略金额格式无效的交易', transaction.transaction_id);
+          warnings.push(
+            `地址 ${maskAddress(wallet.address)} 有条交易金额格式无效（${transaction.transaction_id || '未知 id'}），已忽略`
+          );
+          return;
         }
+        if (amountMicros < 0n) return;
+        // 排除自有地址互转
+        if (excludeSelf && ownAddresses.has(String(transaction?.from || ''))) return;
+        // 按 交易ID + 收款地址 + 金额 去重
+        const dedupKey = `${transaction.transaction_id}|${transaction.to}|${transaction.value}`;
+        if (seenKeys.has(dedupKey)) {
+          deduped += 1;
+          return;
+        }
+        seenKeys.add(dedupKey);
+        if (maxRecords > 0 && records.length >= maxRecords) {
+          recordLimitReached = true;
+          return;
+        }
+        records.push({
+          label: wallet.label,
+          address: wallet.address,
+          from: String(transaction?.from || ''),
+          amountMicros,
+          timestamp,
+          time: CHINA_DATE_TIME_FORMATTER.format(new Date(timestamp)),
+        });
       });
     } catch (error) {
-      console.error(error);
-      errors.push(`地址 ${wallet.address} 查询失败：${formatRequestError(error)}`);
+      if (logger) {
+        logger.warn('query.address.failed', {
+          address: maskAddress(wallet.address),
+          status: error.status,
+          code: error.code,
+          error: error.message,
+        });
+      }
+      errors.push(`地址 ${maskAddress(wallet.address)} 查询失败：${formatRequestError(error)}`);
     } finally {
       completed += 1;
       if (onProgress) onProgress(completed, wallets.length);
     }
   });
 
+  if (skipped > 0) {
+    warnings.push(`有 ${skipped} 个地址因超时或记录数上限未查询，结果可能不完整`);
+  }
+  if (recordLimitReached) {
+    warnings.push(`已达最大记录数 ${maxRecords}，结果可能不完整`);
+  }
   records.sort((a, b) => a.timestamp - b.timestamp);
   const totalMicros = records.reduce((sum, item) => sum + item.amountMicros, 0n);
-  return { records, errors, totalMicros, totalText: formatUsdt(totalMicros) };
+  return {
+    records,
+    errors,
+    warnings,
+    deduped,
+    totalMicros,
+    totalText: formatUsdt(totalMicros),
+  };
 }
+
+// ---------- 展示 ----------
 
 function buildCsv(records, year, month) {
   const rows = [['标签', '收款地址', '付款地址', '金额 (USDT)', '时间']];
@@ -213,8 +363,9 @@ function buildCsv(records, year, month) {
   return { csv, filename };
 }
 
-function summarizeRecords(records, totalText, rate, year, month) {
-  const totalCny = Number(totalText) * rate;
+function summarizeRecords(records, totalMicros, rate, year, month) {
+  const totalText = formatUsdt(totalMicros);
+  const totalCny = (Number(totalMicros) / 1e6) * rate;
   const monthText = `${year}-${String(month).padStart(2, '0')}`;
   let text = [
     `📊 ${monthText} 收入汇总（北京时间）`,
@@ -239,13 +390,42 @@ function summarizeRecords(records, totalText, rate, year, month) {
   return text;
 }
 
+// ---------- API Key 连通性探测（复用统一配置，不再硬编码 URL） ----------
+
+async function probeApiKey(apiKey, { apiBase, timeout = 15000 } = {}) {
+  const base = String(apiBase || 'https://api.trongrid.io/v1/accounts/').replace(/\/+$/, '') + '/';
+  const probeUrl = `${base}T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb/transactions/trc20?limit=1`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(probeUrl, {
+      headers: { Accept: 'application/json', 'TRON-PRO-API-KEY': apiKey },
+      signal: controller.signal,
+    });
+    if (response.ok) return '连通性检测：通过';
+    if (response.status === 401 || response.status === 403) {
+      return '连通性检测：失败（401/403）。请核对 Key。';
+    }
+    return `连通性检测：HTTP ${response.status}（可再试查询）`;
+  } catch (error) {
+    return `连通性检测：网络异常（${error.message || error}）`;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 module.exports = {
   isValidTronAddress,
+  base58Decode,
+  getChinaMonthRange,
   getCurrentChinaYearMonth,
   formatUsdt,
   formatRequestError,
+  fetchJson,
+  fetchAllTransactions,
   fetchUsdtCnyRate,
   queryMonthIncome,
+  probeApiKey,
   buildCsv,
   summarizeRecords,
 };

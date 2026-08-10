@@ -6,9 +6,12 @@ const {
   getCurrentChinaYearMonth,
   fetchUsdtCnyRate,
   queryMonthIncome,
+  probeApiKey,
   buildCsv,
   summarizeRecords,
 } = require('./trongrid');
+const { Logger, maskApiKey, maskUserId } = require('./logger');
+const { Semaphore, RateLimiter, QueryCache } = require('./query-gate');
 
 // 底部常驻按钮文案
 const BTN = {
@@ -62,18 +65,14 @@ function validateYearMonth(year, month) {
 }
 
 function normalizeApiKey(value) {
-  return String(value ?? '')
-    .trim()
-    .replace(/^<|>$/g, '')
-    .replace(/^["']|["']$/g, '')
-    .trim();
-}
-
-function maskApiKey(apiKey) {
-  const key = normalizeApiKey(apiKey);
-  if (!key) return '未设置';
-  if (key.length <= 8) return `${key.slice(0, 2)}***`;
-  return `${key.slice(0, 4)}...${key.slice(-4)}（${key.length} 位）`;
+  // 反复剥离首尾的 <> 与引号，直到稳定（兼容 <"KEY">、"<KEY>" 等组合）
+  let result = String(value ?? '').trim();
+  let previous;
+  do {
+    previous = result;
+    result = result.replace(/^<|>$/g, '').replace(/^["']|["']$/g, '');
+  } while (result !== previous);
+  return result.trim();
 }
 
 function monthLabel(year, month) {
@@ -82,9 +81,47 @@ function monthLabel(year, month) {
 
 function createBot(config, storage) {
   const bot = new Telegraf(config.telegramBotToken);
+  const logger = new Logger(config.logLevel);
   const queryingUsers = new Set();
-  /** @type {Map<number, { type: string, step?: string, data?: any }>} */
+  const querySemaphore = new Semaphore(config.globalQueryConcurrency);
+  const rateLimiter = new RateLimiter(config.maxQueriesPerUserPerMin, 60000);
+  const queryCache = new QueryCache(config.queryCacheTtlMs, 50);
+  /** @type {Map<number, { type: string, step?: string, data?: any, createdAt: number }>} */
   const sessions = new Map();
+
+  // 会话过期清理
+  const sessionTimer = setInterval(() => {
+    if (config.sessionTtlMs <= 0) return;
+    const now = Date.now();
+    for (const [userId, session] of sessions) {
+      if (now - session.createdAt > config.sessionTtlMs) sessions.delete(userId);
+    }
+  }, 60000);
+  sessionTimer.unref?.();
+  const originalStop = bot.stop.bind(bot);
+  bot.stop = async (reason) => {
+    clearInterval(sessionTimer);
+    await originalStop(reason);
+  };
+
+  // ---------- 访问控制 ----------
+  bot.use(async (ctx, next) => {
+    if (!ctx.from) return next();
+    if (config.allowedUserIds.length > 0 && !config.allowedUserIds.includes(ctx.from.id)) {
+      logger.info('bot.denied.user', {
+        user: maskUserId(ctx.from.id),
+        chat: ctx.chat?.type,
+      });
+      try {
+        if (ctx.callbackQuery) await ctx.answerCbQuery('未授权');
+        await ctx.reply('该 Bot 未授权给你使用。');
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    return next();
+  });
 
   function resolveApiKey(user) {
     return normalizeApiKey(user.apiKey || config.defaultTronGridApiKey || '');
@@ -95,12 +132,30 @@ function createBot(config, storage) {
     return config.defaultUsdtCnyRate;
   }
 
+  /** 敏感操作仅限私聊（可配置关闭） */
+  function assertPrivateChat(ctx) {
+    if (!config.requirePrivateChat) return true;
+    if (ctx.chat?.type === 'private') return true;
+    ctx.reply('敏感操作仅允许在私聊中使用，请直接私聊本 Bot。', MAIN_KEYBOARD).catch(() => {});
+    return false;
+  }
+
   function clearSession(userId) {
     sessions.delete(userId);
   }
 
   function setSession(userId, session) {
-    sessions.set(userId, session);
+    sessions.set(userId, { ...session, createdAt: Date.now() });
+  }
+
+  function getSession(userId) {
+    const session = sessions.get(userId);
+    if (!session) return undefined;
+    if (config.sessionTtlMs > 0 && Date.now() - session.createdAt > config.sessionTtlMs) {
+      sessions.delete(userId);
+      return undefined;
+    }
+    return session;
   }
 
   async function replyMain(ctx, text, extra = {}) {
@@ -223,6 +278,7 @@ function createBot(config, storage) {
   }
 
   async function showAddresses(ctx) {
+    if (!assertPrivateChat(ctx)) return;
     const user = storage.getUser(ctx.from.id);
     await ctx.reply(addressListText(user), {
       ...MAIN_KEYBOARD,
@@ -231,6 +287,7 @@ function createBot(config, storage) {
   }
 
   async function showSettings(ctx) {
+    if (!assertPrivateChat(ctx)) return;
     const user = storage.getUser(ctx.from.id);
     await ctx.reply(settingsText(user), {
       ...MAIN_KEYBOARD,
@@ -239,6 +296,7 @@ function createBot(config, storage) {
   }
 
   async function startAddAddress(ctx) {
+    if (!assertPrivateChat(ctx)) return;
     setSession(ctx.from.id, { type: 'add_address', step: 'address' });
     await ctx.reply(
       [
@@ -256,6 +314,7 @@ function createBot(config, storage) {
   }
 
   async function startSetApiKey(ctx) {
+    if (!assertPrivateChat(ctx)) return;
     setSession(ctx.from.id, { type: 'set_apikey' });
     await ctx.reply(
       [
@@ -271,6 +330,7 @@ function createBot(config, storage) {
   }
 
   async function startSetRate(ctx) {
+    if (!assertPrivateChat(ctx)) return;
     setSession(ctx.from.id, { type: 'set_rate' });
     await ctx.reply(
       [
@@ -286,9 +346,11 @@ function createBot(config, storage) {
   }
 
   async function saveApiKey(ctx, raw) {
+    if (!assertPrivateChat(ctx)) return;
     if (raw.toLowerCase() === 'clear' || raw.toLowerCase() === 'none') {
       storage.updateUser(ctx.from.id, { apiKey: '' });
       clearSession(ctx.from.id);
+      logger.info('user.apikey.cleared', { user: maskUserId(ctx.from.id) });
       await replyMain(
         ctx,
         config.defaultTronGridApiKey
@@ -311,22 +373,12 @@ function createBot(config, storage) {
       // ignore
     }
 
-    let probeText = '';
-    try {
-      const probeUrl =
-        'https://api.trongrid.io/v1/accounts/T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb/transactions/trc20?limit=1';
-      const response = await fetch(probeUrl, {
-        headers: { Accept: 'application/json', 'TRON-PRO-API-KEY': apiKey },
-      });
-      if (response.ok) probeText = '连通性检测：通过';
-      else if (response.status === 401 || response.status === 403) {
-        probeText = '连通性检测：失败（401/403）。请核对 Key。';
-      } else {
-        probeText = `连通性检测：HTTP ${response.status}（可再试查询）`;
-      }
-    } catch (error) {
-      probeText = `连通性检测：网络异常（${error.message || error}）`;
-    }
+    // 复用 TronGrid 客户端配置做连通性探测，不再硬编码 URL
+    const probeText = await probeApiKey(apiKey, {
+      apiBase: config.trongridApiBase,
+      timeout: config.requestTimeoutMs,
+    });
+    logger.info('user.apikey.saved', { user: maskUserId(ctx.from.id) });
 
     clearSession(ctx.from.id);
     await replyMain(ctx, `API Key 已保存：${maskApiKey(apiKey)}\n${probeText}`);
@@ -334,8 +386,13 @@ function createBot(config, storage) {
 
   async function runQuery(ctx, { year, month, exportCsv }) {
     const userId = ctx.from.id;
+    if (!assertPrivateChat(ctx)) return;
     if (queryingUsers.has(userId)) {
       await ctx.reply('你有正在进行的查询，请稍候。', MAIN_KEYBOARD);
+      return;
+    }
+    if (!rateLimiter.allow(userId)) {
+      await ctx.reply('查询太频繁了，请稍等片刻再试。', MAIN_KEYBOARD);
       return;
     }
 
@@ -363,6 +420,10 @@ function createBot(config, storage) {
     queryingUsers.add(userId);
     const label = monthLabel(year, month);
     const status = await ctx.reply(`开始查询 ${label}（0/${user.addresses.length}）...`, MAIN_KEYBOARD);
+    const startedAt = Date.now();
+    const cacheKey = `${userId}|${year}|${month}|${user.excludeSelf}|${exportCsv}|${apiKey}`;
+    const cached = !exportCsv ? queryCache.get(cacheKey) : undefined;
+    const cacheHit = Boolean(cached);
 
     let progressActive = true;
     let progressChain = Promise.resolve();
@@ -377,48 +438,84 @@ function createBot(config, storage) {
 
     try {
       let rate = resolveRate(user);
-      try {
-        const live = await fetchUsdtCnyRate(config.coingeckoRateUrl, {
-          timeout: 10000,
-          retries: config.maxRequestRetries,
-        });
-        if (!Number.isFinite(user.usdtRate) || user.usdtRate <= 0) rate = live;
-      } catch (error) {
-        console.warn('实时汇率不可用，使用已配置汇率', error);
-      }
+      let records = cached?.records || [];
+      let errors = cached?.errors || [];
+      let warnings = cached?.warnings || [];
+      let deduped = cached?.deduped || 0;
+      let totalMicros = cached?.totalMicros ?? 0n;
 
-      const { records, errors, totalText } = await queryMonthIncome({
-        wallets: user.addresses.map((item) => ({ ...item })),
-        year,
-        month,
-        apiKey,
-        excludeSelf: user.excludeSelf,
-        usdtContract: config.usdtContract,
-        apiBase: config.trongridApiBase,
-        concurrency: config.addressConcurrency,
-        timeout: config.requestTimeoutMs,
-        retries: config.maxRequestRetries,
-        onProgress: (completed, total) => {
-          progressChain = progressChain
-            .then(async () => {
-              if (!progressActive) return;
-              await editStatus(`查询 ${label}：${completed}/${total} 个地址...`);
-            })
-            .catch(() => {});
-        },
-      });
+      if (!cached) {
+        await querySemaphore.acquire();
+        try {
+          try {
+            const live = await fetchUsdtCnyRate(config.coingeckoRateUrl, {
+              timeout: 10000,
+              retries: config.maxRequestRetries,
+            });
+            if (!Number.isFinite(user.usdtRate) || user.usdtRate <= 0) rate = live;
+          } catch (error) {
+            logger.warn('rate.fetch.failed', { error: error.message });
+          }
+
+          const result = await queryMonthIncome({
+            wallets: user.addresses.map((item) => ({ ...item })),
+            year,
+            month,
+            apiKey,
+            excludeSelf: user.excludeSelf,
+            usdtContract: config.usdtContract,
+            apiBase: config.trongridApiBase,
+            concurrency: config.addressConcurrency,
+            timeout: config.requestTimeoutMs,
+            retries: config.maxRequestRetries,
+            maxPages: config.maxPagesPerAddress,
+            maxRecords: config.maxRecordsPerQuery,
+            totalTimeoutMs: config.queryTotalTimeoutMs,
+            onProgress: (completed, total) => {
+              progressChain = progressChain
+                .then(async () => {
+                  if (!progressActive) return;
+                  await editStatus(`查询 ${label}：${completed}/${total} 个地址...`);
+                })
+                .catch(() => {});
+            },
+            logger,
+          });
+          ({ records, errors, warnings, deduped, totalMicros } = result);
+          if (!exportCsv && records.length <= 1000) {
+            queryCache.set(cacheKey, { records, errors, warnings, deduped, totalMicros, rate });
+          }
+        } finally {
+          querySemaphore.release();
+        }
+      } else {
+        rate = cached.rate;
+      }
 
       progressActive = false;
       await progressChain;
 
       let text = '';
       if (errors.length) text += `${errors.map((item) => `⚠️ ${item}`).join('\n')}\n\n`;
-      text += summarizeRecords(records, totalText, rate, year, month);
+      if (warnings.length) text += `${warnings.map((item) => `⚠️ ${item}`).join('\n')}\n\n`;
+      text += summarizeRecords(records, totalMicros, rate, year, month);
       text += `\n\n汇率：1 USDT = ${Number(rate).toFixed(4)} 元`;
       if (user.excludeSelf) text += '\n已排除自有地址互转';
 
       await editStatus(`查询完成 ${label}`);
       await ctx.reply(text, MAIN_KEYBOARD);
+
+      logger.info('query.completed', {
+        user: maskUserId(userId),
+        month: label,
+        records: records.length,
+        deduped,
+        failed: errors.length,
+        warnings: warnings.length,
+        cacheHit,
+        durationMs: Date.now() - startedAt,
+        exportCsv,
+      });
 
       if (exportCsv && records.length) {
         const { csv, filename } = buildCsv(records, year, month);
@@ -439,7 +536,11 @@ function createBot(config, storage) {
     } catch (error) {
       progressActive = false;
       await progressChain;
-      console.error(error);
+      logger.error('query.failed', {
+        user: maskUserId(userId),
+        month: label,
+        error: error.message,
+      });
       const failText = `查询失败：${error.message || error}`;
       const edited = await editStatus(failText);
       if (!edited) await ctx.reply(failText, MAIN_KEYBOARD);
@@ -468,6 +569,7 @@ function createBot(config, storage) {
   });
 
   bot.command('add', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     const parts = ctx.message.text.trim().split(/\s+/);
     const address = (parts[1] || '').trim();
     const label = parts.slice(2).join(' ').trim() || '默认标签';
@@ -481,7 +583,7 @@ function createBot(config, storage) {
     }
     const result = storage.addAddress(ctx.from.id, address, label);
     if (!result.ok) {
-      await replyMain(ctx, '该地址已存在。');
+      await replyMain(ctx, result.reason === 'invalid_address' ? '无效的 TRON 地址。' : '该地址已存在。');
       return;
     }
     await replyMain(ctx, `已添加：${label}\n${address}`);
@@ -490,6 +592,7 @@ function createBot(config, storage) {
   bot.command('list', async (ctx) => showAddresses(ctx));
 
   bot.command('del', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     const target = (ctx.message.text.trim().split(/\s+/)[1] || '').trim();
     if (!target) {
       await showAddresses(ctx);
@@ -504,6 +607,7 @@ function createBot(config, storage) {
   });
 
   bot.command('rate', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     const arg = (ctx.message.text.trim().split(/\s+/)[1] || '').trim().toLowerCase();
     const user = storage.getUser(ctx.from.id);
     if (!arg) {
@@ -538,6 +642,7 @@ function createBot(config, storage) {
   });
 
   bot.command('exclude', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     const arg = (ctx.message.text.trim().split(/\s+/)[1] || '').trim().toLowerCase();
     const user = storage.getUser(ctx.from.id);
     if (!arg) {
@@ -628,7 +733,7 @@ function createBot(config, storage) {
     if (text.startsWith('/')) return next();
     if (Object.values(BTN).includes(text)) return next();
 
-    const session = sessions.get(ctx.from.id);
+    const session = getSession(ctx.from.id);
     if (!session) return next();
 
     if (session.type === 'add_address') {
@@ -644,7 +749,7 @@ function createBot(config, storage) {
           const result = storage.addAddress(ctx.from.id, address, labelFromLine);
           clearSession(ctx.from.id);
           if (!result.ok) {
-            await replyMain(ctx, '该地址已存在。');
+            await replyMain(ctx, result.reason === 'invalid_address' ? '地址格式不对，已取消。' : '该地址已存在。');
             return;
           }
           await replyMain(ctx, `已添加：${labelFromLine}\n${address}`);
@@ -663,7 +768,7 @@ function createBot(config, storage) {
         const result = storage.addAddress(ctx.from.id, session.data.address, label);
         clearSession(ctx.from.id);
         if (!result.ok) {
-          await replyMain(ctx, '该地址已存在。');
+          await replyMain(ctx, result.reason === 'invalid_address' ? '地址格式不对，已取消。' : '该地址已存在。');
           return;
         }
         await replyMain(ctx, `已添加：${label}\n${session.data.address}`);
@@ -713,6 +818,7 @@ function createBot(config, storage) {
   });
 
   bot.action('nav:list', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     await ctx.answerCbQuery('已刷新');
     const user = storage.getUser(ctx.from.id);
     try {
@@ -723,6 +829,7 @@ function createBot(config, storage) {
   });
 
   bot.action(/^del:(\d+)$/, async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     const index = ctx.match[1];
     const result = storage.deleteAddress(ctx.from.id, index);
     if (!result.ok) {
@@ -752,6 +859,7 @@ function createBot(config, storage) {
   });
 
   bot.action('set:rate_live', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     await ctx.answerCbQuery('正在获取...');
     try {
       const live = await fetchUsdtCnyRate(config.coingeckoRateUrl, {
@@ -772,6 +880,7 @@ function createBot(config, storage) {
   });
 
   bot.action('set:exclude_toggle', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     const user = storage.getUser(ctx.from.id);
     storage.updateUser(ctx.from.id, { excludeSelf: !user.excludeSelf });
     const next = storage.getUser(ctx.from.id);
@@ -784,6 +893,7 @@ function createBot(config, storage) {
   });
 
   bot.action('set:refresh', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
     await ctx.answerCbQuery('已刷新');
     const user = storage.getUser(ctx.from.id);
     try {
@@ -836,7 +946,7 @@ function createBot(config, storage) {
   });
 
   bot.catch((error, ctx) => {
-    console.error('Bot 错误', error);
+    logger.error('bot.unhandled', { error: error.message });
     if (ctx?.reply) {
       ctx.reply('处理消息时出错，请稍后重试。', MAIN_KEYBOARD).catch(() => {});
     }

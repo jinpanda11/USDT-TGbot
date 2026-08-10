@@ -6,7 +6,9 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test",
+    "check": "node scripts/check-syntax.js"
   },
   "engines": {
     "node": ">=20"

@@ -7,3 +7,4 @@ watchtower-config.json
 npm-debug.log*
 .idea/
 .vscode/
+.zcode/
