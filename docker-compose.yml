@@ -13,15 +13,15 @@ services:
       - com.centurylinklabs.watchtower.enable=true
 
   watchtower:
-    image: containrrr/watchtower:latest
+    # pin version; latest may negotiate too-old Docker API against new daemons
+    image: containrrr/watchtower:1.7.1
     container_name: usdt-income-watchtower
     restart: always
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # 仅当本机已 docker login 且 config.json 是文件时才需要；
-      # 公开镜像可不挂载。若 /root/.docker/config.json 被误建成目录，请先删掉该目录。
-      # - /root/.docker/config.json:/config.json:ro
     environment:
+      # newer Docker Engine rejects very old client API versions
+      DOCKER_API_VERSION: "1.44"
       WATCHTOWER_POLL_INTERVAL: "300"
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
