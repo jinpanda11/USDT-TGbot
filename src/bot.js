@@ -38,12 +38,28 @@ function validateYearMonth(year, month) {
   );
 }
 
+/** 去掉用户误粘贴的 <>、引号与首尾空白 */
+function normalizeApiKey(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/^<|>$/g, '')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+}
+
+function maskApiKey(apiKey) {
+  const key = normalizeApiKey(apiKey);
+  if (!key) return '未设置';
+  if (key.length <= 8) return `${key.slice(0, 2)}***`;
+  return `${key.slice(0, 4)}...${key.slice(-4)}（${key.length} 位）`;
+}
+
 function createBot(config, storage) {
   const bot = new Telegraf(config.telegramBotToken);
   const queryingUsers = new Set();
 
   function resolveApiKey(user) {
-    return (user.apiKey || config.defaultTronGridApiKey || '').trim();
+    return normalizeApiKey(user.apiKey || config.defaultTronGridApiKey || '');
   }
 
   function resolveRate(user) {
@@ -94,12 +110,19 @@ function createBot(config, storage) {
 
   bot.command('setkey', async (ctx) => {
     const parts = ctx.message.text.trim().split(/\s+/);
-    const apiKey = parts.slice(1).join(' ').trim();
-    if (!apiKey) {
-      await ctx.reply('用法：/setkey <TronGrid API Key>\n清除个人 Key：/setkey clear');
+    const raw = parts.slice(1).join(' ').trim();
+    if (!raw) {
+      await ctx.reply(
+        [
+          '用法：/setkey 你的API密钥',
+          '注意：不要带尖括号 <> 或引号',
+          '正确示例：/setkey d4a7xxxx-xxxx-xxxx-xxxx-xxxxxxxxe0b',
+          '清除个人 Key：/setkey clear',
+        ].join('\n')
+      );
       return;
     }
-    if (apiKey.toLowerCase() === 'clear' || apiKey.toLowerCase() === 'none') {
+    if (raw.toLowerCase() === 'clear' || raw.toLowerCase() === 'none') {
       storage.updateUser(ctx.from.id, { apiKey: '' });
       await ctx.reply(
         config.defaultTronGridApiKey
@@ -108,13 +131,47 @@ function createBot(config, storage) {
       );
       return;
     }
+
+    const apiKey = normalizeApiKey(raw);
+    if (apiKey.length < 20) {
+      await ctx.reply('API Key 看起来太短，请从 https://www.trongrid.io/ 复制完整 Key。');
+      return;
+    }
+
     storage.updateUser(ctx.from.id, { apiKey });
     try {
       await ctx.deleteMessage();
     } catch {
       // 无私聊删消息权限时忽略
     }
-    await ctx.reply('API Key 已保存（建议在私聊中设置）。原消息如未删除请手动删除。');
+
+    // 保存后立刻探测一次，避免无效 Key 到查询时才暴露
+    let probeText = '';
+    try {
+      const probeUrl =
+        'https://api.trongrid.io/v1/accounts/T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb/transactions/trc20?limit=1';
+      const response = await fetch(probeUrl, {
+        headers: { Accept: 'application/json', 'TRON-PRO-API-KEY': apiKey },
+      });
+      if (response.ok) {
+        probeText = '连通性检测：通过';
+      } else if (response.status === 401 || response.status === 403) {
+        probeText =
+          '连通性检测：失败（401/403）。Key 无效或未开通权限，请到 TronGrid 控制台核对。';
+      } else {
+        probeText = `连通性检测：HTTP ${response.status}（Key 可能仍可用，可再试 /query）`;
+      }
+    } catch (error) {
+      probeText = `连通性检测：网络异常（${error.message || error}），Key 已保存，可稍后 /query`;
+    }
+
+    await ctx.reply(
+      [
+        `API Key 已保存：${maskApiKey(apiKey)}`,
+        probeText,
+        '原消息如未自动删除请手动删除。',
+      ].join('\n')
+    );
   });
 
   bot.command('add', async (ctx) => {
@@ -146,14 +203,14 @@ function createBot(config, storage) {
     const lines = user.addresses.map(
       (item, index) => `${index + 1}. ${item.label}\n   ${item.address}`
     );
-    const apiKeyStatus = resolveApiKey(user) ? '已配置' : '未配置';
+    const apiKey = resolveApiKey(user);
     const rate = resolveRate(user);
     await ctx.reply(
       [
         `地址列表（${user.addresses.length}）`,
         ...lines,
         '',
-        `API Key：${apiKeyStatus}`,
+        `API Key：${apiKey ? maskApiKey(apiKey) : '未配置'}`,
         `汇率：1 USDT = ${rate} 元`,
         `排除自转：${user.excludeSelf ? '开' : '关'}`,
       ].join('\n')

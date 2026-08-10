@@ -45,6 +45,14 @@ class Storage {
     fs.renameSync(tempPath, this.filePath);
   }
 
+  normalizeApiKey(value) {
+    return String(value ?? '')
+      .trim()
+      .replace(/^<|>$/g, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
+  }
+
   getUser(userId) {
     const key = String(userId);
     if (!this.users[key]) {
@@ -58,6 +66,12 @@ class Storage {
     if (!Array.isArray(user.addresses)) user.addresses = [];
     if (typeof user.excludeSelf !== 'boolean') user.excludeSelf = true;
     if (typeof user.apiKey !== 'string') user.apiKey = '';
+    // 兼容历史数据：去掉误存的 <> / 引号
+    const cleaned = this.normalizeApiKey(user.apiKey);
+    if (cleaned !== user.apiKey) {
+      user.apiKey = cleaned;
+      this.save();
+    }
     return user;
   }
 

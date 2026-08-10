@@ -51,7 +51,9 @@ function formatUsdt(microUnits) {
 }
 
 function formatRequestError(error) {
-  if (error?.status === 401 || error?.status === 403) return 'API Key 无效或无权访问';
+  if (error?.status === 401 || error?.status === 403) {
+    return 'API Key 无效或无权访问（请确认未带 <> 引号，并在 TronGrid 控制台复制完整 Key）';
+  }
   if (error?.status === 429) return '请求过于频繁，重试后仍被限流';
   if (error?.status >= 500) return `TronGrid 服务异常（HTTP ${error.status}）`;
   if (error?.code === 'TIMEOUT') return '请求超时，自动重试后仍未成功';
