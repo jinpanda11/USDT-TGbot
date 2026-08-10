@@ -1,0 +1,33 @@
+services:
+  bot:
+    # 首次部署前改成你的镜像地址，例如：
+    # ghcr.io/yourname/usdt-income-bot:latest
+    image: ${BOT_IMAGE:-ghcr.io/jinpanda11/usdt-income-bot:latest}
+    container_name: usdt-income-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: usdt-income-watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 使用 VPS 上 docker login ghcr.io 后的凭据（推荐）
+      - ${DOCKER_CONFIG_JSON:-~/.docker/config.json}:/config.json:ro
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_ROLLING_RESTART: "true"
+      # 可选：更新成功后 Telegram 通知
+      # WATCHTOWER_NOTIFICATIONS: shoutrrr
+      # WATCHTOWER_NOTIFICATION_URL: telegram://BOT_TOKEN@telegram?channels=CHAT_ID
+    command: ["--interval", "300", "--label-enable", "--cleanup"]

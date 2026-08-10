@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>&#84;&#82;&#79;&#78; &#85;&#83;&#68;&#84; &#38142;&#19978;&#25910;&#20837;&#20998;&#26512;</title>
+  <style>
+    body{font-family:Arial,sans-serif;margin:20px;background:#f4f4f4}
+    .container{max-width:1200px;margin:auto;background:#fff;padding:20px;border-radius:10px;box-shadow:0 0 10px #0002}
+    table{width:100%;border-collapse:collapse;margin:15px 0} th,td{border:1px solid #ddd;padding:8px;text-align:left;word-break:break-all} th{background:#f0f0f0}
+    button,input,select{padding:9px;margin:5px} button{cursor:pointer}button:disabled,input:disabled,select:disabled{cursor:not-allowed;opacity:.65}.loading{color:#666}.error{color:#b00020}.summary{font-size:1.15rem}
+    @media(max-width:700px){body{margin:8px}.container{padding:12px}input[type=text],input[type=password]{width:100%!important;box-sizing:border-box}table{font-size:12px}}
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>&#84;&#82;&#79;&#78; &#85;&#83;&#68;&#84; &#38142;&#19978;&#25910;&#20837;&#20998;&#26512;</h1>
+  <h3>TronGrid API Key</h3>
+  <input type="password" id="tronGridApiKey" placeholder="&#35831;&#36755;&#20837; TronGrid API Key" autocomplete="off" spellcheck="false" style="width:300px" aria-label="TronGrid API Key">
+  <h3>&#22320;&#22336;&#31649;&#29702;</h3>
+  <input type="text" id="newAddr" placeholder="TRON &#22320;&#22336;&#65288;T &#24320;&#22836;&#65289;" style="width:300px">
+  <input type="text" id="newLabel" placeholder="&#26631;&#31614;" value="&#40664;&#35748;&#26631;&#31614;">
+  <button type="button" id="addButton">&#28155;&#21152;&#22320;&#22336;</button>
+  <div id="addrList"></div>
+  <hr>
+  <h3>&#26597;&#35810;&#26376;&#20221;</h3>
+  <input type="number" id="year" min="2000" max="2100" style="width:80px" aria-label="&#24180;&#20221;"> &#24180;
+  <select id="month" aria-label="&#26376;&#20221;"></select> &#26376;
+  <label for="usdtRate">1 USDT =</label>
+  <input type="number" id="usdtRate" value="7.20" min="0" step="0.0001" style="width:90px"> &#20803;
+  <span id="rateStatus" class="loading" aria-live="polite">&#27491;&#22312;&#33719;&#21462;&#23454;&#26102;&#27719;&#29575;...</span>
+  <label><input type="checkbox" id="excludeSelf" checked> &#25490;&#38500;&#33258;&#26377;&#22320;&#22336;&#38388;&#36716;&#36134;</label>
+  <button type="button" id="queryButton">&#26597;&#35810;&#35813;&#26376;&#25910;&#20837;</button>
+  <div id="result" aria-live="polite"></div>
+</div>
+<script>
+const USDT_CONTRACT='TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+const API_BASE='https://api.trongrid.io/v1/accounts/';
+const COINGECKO_RATE_URL='https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=cny';
+const CHINA_TIME_ZONE='Asia/Shanghai';
+const CHINA_UTC_OFFSET_MS=8*60*60*1000;
+const USDT_SCALE=1000000n;
+const ADDRESS_CONCURRENCY=3;
+const REQUEST_TIMEOUT_MS=15000;
+const MAX_REQUEST_RETRIES=2;
+const CHINA_DATE_TIME_FORMATTER=new Intl.DateTimeFormat('zh-CN',{timeZone:CHINA_TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+let addresses=loadAddresses();
+let queryInProgress=false;
+
+function loadAddresses(){
+  try{const value=JSON.parse(localStorage.getItem('tronAddresses')||'[]');return Array.isArray(value)?value:[]}catch{return []}
+}
+function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
+function saveAddresses(){localStorage.setItem('tronAddresses',JSON.stringify(addresses));renderAddressList()}
+function addAddress(){
+  const input=document.getElementById('newAddr');const labelInput=document.getElementById('newLabel');
+  const address=input.value.trim();const label=labelInput.value.trim()||'默认标签';
+  if(!/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address)){alert('无效的 TRON 地址：应为 34 位且以 T 开头。');return}
+  if(addresses.some(item=>item.address===address)){alert('该地址已存在。');return}
+  addresses.push({address,label});saveAddresses();input.value=''
+}
+function deleteAddress(address){addresses=addresses.filter(item=>item.address!==address);saveAddresses()}
+function renderAddressList(){
+  const container=document.getElementById('addrList');
+  if(!addresses.length){container.innerHTML='<p>尚未添加地址。</p>';return}
+  let html='<h4>已添加的地址</h4><table><tr><th>标签</th><th>地址</th><th>操作</th></tr>';
+  addresses.forEach(item=>{html+=`<tr><td>${escapeHtml(item.label)}</td><td>${escapeHtml(item.address)}</td><td><button type="button" data-delete="${escapeHtml(item.address)}"${queryInProgress?' disabled':''}>删除</button></td></tr>`});
+  container.innerHTML=html+'</table>';container.querySelectorAll('[data-delete]').forEach(button=>button.addEventListener('click',()=>deleteAddress(button.dataset.delete)))
+}
+function delay(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function fetchJson(url,{headers={},timeout=REQUEST_TIMEOUT_MS,retries=MAX_REQUEST_RETRIES}={}){
+  let lastError;
+  for(let attempt=0;attempt<=retries;attempt++){
+    const controller=new AbortController();const timeoutId=setTimeout(()=>controller.abort(),timeout);
+    try{
+      const response=await fetch(url,{headers:{Accept:'application/json',...headers},signal:controller.signal});
+      if(!response.ok){const error=new Error(`HTTP ${response.status}`);error.status=response.status;throw error}
+      return await response.json();
+    }catch(error){
+      lastError=error.name==='AbortError'?Object.assign(new Error('请求超时'),{code:'TIMEOUT'}):error;
+      const retryable=!Number.isInteger(lastError.status)||lastError.status===429||lastError.status>=500;
+      if(attempt===retries||!retryable)throw lastError;
+      await delay(500*(2**attempt)+Math.random()*250);
+    }finally{clearTimeout(timeoutId)}
+  }
+  throw lastError;
+}
+async function fetchAllTransactions(url,apiKey){
+  const transactions=[];let nextUrl=url;const seen=new Set();
+  while(nextUrl&&!seen.has(nextUrl)){
+    seen.add(nextUrl);
+    const response=await fetchJson(nextUrl,{headers:{'TRON-PRO-API-KEY':apiKey}});
+    if(response?.success===false)throw new Error(response.error||'TronGrid 返回查询失败');
+    transactions.push(...(response?.data||[]));
+    const next=response?.meta?.links?.next;
+    nextUrl=next?new URL(next,'https://api.trongrid.io').href:null;
+  }
+  return transactions
+}
+async function mapWithConcurrency(items,limit,worker){
+  let nextIndex=0;
+  async function run(){
+    while(nextIndex<items.length){const index=nextIndex++;await worker(items[index],index)}
+  }
+  await Promise.all(Array.from({length:Math.min(limit,items.length)},run));
+}
+function setQuerying(isQuerying){
+  queryInProgress=isQuerying;
+  ['queryButton','addButton','newAddr','newLabel','tronGridApiKey','year','month','usdtRate','excludeSelf'].forEach(id=>{document.getElementById(id).disabled=isQuerying});
+  document.querySelectorAll('[data-delete]').forEach(button=>{button.disabled=isQuerying});
+  const queryButton=document.getElementById('queryButton');queryButton.textContent=isQuerying?'正在查询...':'查询该月收入';
+  document.getElementById('result').setAttribute('aria-busy',String(isQuerying));
+}
+function getChinaMonthRange(year,month){
+  const start=Date.UTC(year,month-1,1)-CHINA_UTC_OFFSET_MS;
+  const endExclusive=Date.UTC(year,month,1)-CHINA_UTC_OFFSET_MS;
+  return {start,endExclusive};
+}
+function getCurrentChinaYearMonth(){
+  const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:CHINA_TIME_ZONE,year:'numeric',month:'numeric'}).formatToParts(new Date()).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));
+  return {year:parts.year,month:parts.month};
+}
+function formatUsdt(microUnits){
+  const negative=microUnits<0n;const absolute=negative?-microUnits:microUnits;
+  return `${negative?'-':''}${absolute/USDT_SCALE}.${(absolute%USDT_SCALE).toString().padStart(6,'0')}`;
+}
+function formatRequestError(error){
+  if(error?.status===401||error?.status===403)return 'API Key 无效或无权访问';
+  if(error?.status===429)return '请求过于频繁，重试后仍被限流';
+  if(error?.status>=500)return `TronGrid 服务异常（HTTP ${error.status}）`;
+  if(error?.code==='TIMEOUT')return '请求超时，自动重试后仍未成功';
+  if(error?.status)return `请求失败（HTTP ${error.status}）`;
+  return `网络或接口异常（${error?.message||'未知错误'}）`;
+}
+function csvCell(value){return `"${String(value??'').replace(/"/g,'""')}"`}
+async function fetchUsdtCnyRate(){
+  const response=await fetchJson(COINGECKO_RATE_URL,{timeout:10000});
+  const rate=Number.parseFloat(response?.tether?.cny);
+  if(!Number.isFinite(rate)||rate<=0) throw new Error('Invalid USDT/CNY rate');
+  return rate;
+}
+async function updateUsdtCnyRate(){
+  const input=document.getElementById('usdtRate');const status=document.getElementById('rateStatus');
+  try{
+    const rate=await fetchUsdtCnyRate();input.value=rate.toFixed(4);status.textContent=`实时汇率：1 USDT = ${rate.toFixed(4)} 元`;status.className='';return rate;
+  }catch(error){
+    console.warn('无法获取实时 USDT/CNY 汇率',error);status.textContent='实时汇率不可用，使用输入框中的数值。';status.className='error';return Number.parseFloat(input.value);
+  }
+}
+function exportCSV(records,year,month){
+  const rows=[['标签','收款地址','付款地址','金额 (USDT)','时间']];
+  records.forEach(item=>rows.push([item.label,item.address,item.from,formatUsdt(item.amountMicros),item.time]));
+  const csv='\uFEFF'+rows.map(row=>row.map(csvCell).join(',')).join('\r\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');
+  link.href=url;link.download=`usdt_income_${year}-${String(month).padStart(2,'0')}.csv`;link.click();URL.revokeObjectURL(url)
+}
+async function queryMonth(){
+  const year=Number.parseInt(document.getElementById('year').value,10);const month=Number.parseInt(document.getElementById('month').value,10);const result=document.getElementById('result');
+  const excludeSelf=document.getElementById('excludeSelf').checked;
+  const apiKey=document.getElementById('tronGridApiKey').value.trim();
+  if(!Number.isInteger(year)||year<2000||year>2100||!Number.isInteger(month)||month<1||month>12){result.innerHTML='<p class="error">请输入 2000 至 2100 年之间的有效年月。</p>';return}
+  if(!apiKey){result.innerHTML='<p class="error">请输入 TronGrid API Key。</p>';return}
+  if(!addresses.length){result.innerHTML='<p class="error">请先添加地址。</p>';return}
+  const wallets=addresses.map(item=>({...item}));const ownAddresses=new Set(wallets.map(item=>item.address));
+  const {start,endExclusive}=getChinaMonthRange(year,month);const records=[];const errors=[];let rate;let completed=0;
+  setQuerying(true);
+  result.innerHTML='<p class="loading" id="queryProgress">正在获取实时汇率...</p>';
+  const progress=document.getElementById('queryProgress');
+  try{
+    rate=await updateUsdtCnyRate();
+    if(!Number.isFinite(rate)||rate<0){result.innerHTML='<p class="error">请输入有效的 USDT 汇率。</p>';return}
+    progress.textContent=`正在查询 0/${wallets.length} 个地址...`;
+    await mapWithConcurrency(wallets,ADDRESS_CONCURRENCY,async wallet=>{
+      try{
+        const params=new URLSearchParams({contract_address:USDT_CONTRACT,only_confirmed:'true',only_to:'true',limit:'200',min_timestamp:String(start),max_timestamp:String(endExclusive-1)});
+        const transactions=await fetchAllTransactions(`${API_BASE}${encodeURIComponent(wallet.address)}/transactions/trc20?${params}`,apiKey);
+        transactions.forEach(transaction=>{
+          if(excludeSelf&&ownAddresses.has(transaction.from))return;
+          const timestamp=Number(transaction.block_timestamp);if(!Number.isFinite(timestamp))return;
+          try{
+            const amountMicros=BigInt(transaction.value);if(amountMicros<0n)return;
+            records.push({label:wallet.label,address:wallet.address,from:String(transaction.from||''),amountMicros,timestamp,time:CHINA_DATE_TIME_FORMATTER.format(new Date(timestamp))});
+          }catch{console.warn('忽略金额格式无效的交易',transaction.transaction_id)}
+        })
+      }catch(error){console.error(error);errors.push(`地址 ${wallet.address} 查询失败：${formatRequestError(error)}`)}
+      finally{completed++;progress.textContent=`已完成 ${completed}/${wallets.length} 个地址...`}
+    });
+  }finally{setQuerying(false)}
+  records.sort((a,b)=>a.timestamp-b.timestamp);
+  const totalMicros=records.reduce((sum,item)=>sum+item.amountMicros,0n);const totalText=formatUsdt(totalMicros);const totalCny=Number(totalText)*rate;
+  let html=errors.map(message=>`<p class="error">${escapeHtml(message)}</p>`).join('');
+  html+=`<p class="summary">${year}-${String(month).padStart(2,'0')}（北京时间）合计：<strong>${totalText} USDT</strong> &#165;${totalCny.toFixed(2)} &#20803;（${records.length} 条记录）</p>`;
+  if(!records.length){result.innerHTML=html+'<p>未找到 USDT 入账记录。</p>';return}
+  html+='<button type="button" id="exportButton">导出 CSV</button><table><tr><th>标签</th><th>收款地址</th><th>付款地址</th><th>金额</th><th>时间</th></tr>';
+  records.forEach(item=>{html+=`<tr><td>${escapeHtml(item.label)}</td><td>${escapeHtml(item.address)}</td><td>${escapeHtml(item.from)}</td><td>${formatUsdt(item.amountMicros)}</td><td>${escapeHtml(item.time)}</td></tr>`});
+  result.innerHTML=html+'</table>';document.getElementById('exportButton').addEventListener('click',()=>exportCSV(records,year,month))
+}
+const apiKeyInput=document.getElementById('tronGridApiKey');
+apiKeyInput.value=localStorage.getItem('tronGridApiKey')||'';
+apiKeyInput.addEventListener('input',()=>localStorage.setItem('tronGridApiKey',apiKeyInput.value.trim()));
+const currentChinaDate=getCurrentChinaYearMonth();document.getElementById('year').value=currentChinaDate.year;
+for(let value=1;value<=12;value++){const option=document.createElement('option');option.value=value;option.textContent=value;option.selected=value===currentChinaDate.month;document.getElementById('month').appendChild(option)}
+document.getElementById('addButton').addEventListener('click',addAddress);document.getElementById('queryButton').addEventListener('click',queryMonth);renderAddressList();
+updateUsdtCnyRate();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+node_modules/
+data/
+.env
+watchtower-config.json
+*.log
+.DS_Store
+npm-debug.log*
+.idea/
+.vscode/
