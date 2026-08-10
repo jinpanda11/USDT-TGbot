@@ -216,20 +216,25 @@ function buildCsv(records, year, month) {
 function summarizeRecords(records, totalText, rate, year, month) {
   const totalCny = Number(totalText) * rate;
   const monthText = `${year}-${String(month).padStart(2, '0')}`;
-  let text = `${monthText}（北京时间）合计：${totalText} USDT ≈ ¥${totalCny.toFixed(2)}（${records.length} 条）\n`;
+  let text = [
+    `📊 ${monthText} 收入汇总（北京时间）`,
+    `合计：${totalText} USDT`,
+    `约合：¥${totalCny.toFixed(2)}`,
+    `笔数：${records.length}`,
+  ].join('\n');
 
   if (!records.length) {
-    text += '\n未找到 USDT 入账记录。';
+    text += '\n\n未找到 USDT 入账记录。';
     return text;
   }
 
-  const preview = records.slice(0, 20);
-  text += '\n最近/部分明细（最多 20 条）：\n';
+  const preview = records.slice(0, 15);
+  text += '\n\n明细预览（最多 15 条）：\n';
   preview.forEach((item, index) => {
-    text += `${index + 1}. ${item.time} | ${formatUsdt(item.amountMicros)} | ${item.from.slice(0, 6)}… → ${item.label}\n`;
+    text += `${index + 1}. ${item.time} | ${formatUsdt(item.amountMicros)} USDT | ${item.from.slice(0, 6)}… → ${item.label}\n`;
   });
-  if (records.length > 20) {
-    text += `\n… 另有 ${records.length - 20} 条，请用 /export ${year} ${month} 导出完整 CSV。`;
+  if (records.length > 15) {
+    text += `\n… 另有 ${records.length - 15} 条未展示，可用 /export ${year} ${month} 导出完整 CSV。`;
   }
   return text;
 }

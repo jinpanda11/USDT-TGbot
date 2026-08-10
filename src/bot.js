@@ -319,7 +319,7 @@ function createBot(config, storage) {
     const user = storage.getUser(userId);
     const apiKey = resolveApiKey(user);
     if (!apiKey) {
-      await ctx.reply('请先 /setkey <TronGrid API Key>，或联系管理员配置服务器默认 Key。');
+      await ctx.reply('请先 /setkey 你的TronGrid API Key，或联系管理员配置服务器默认 Key。');
       return;
     }
     if (!user.addresses.length) {
@@ -336,9 +336,21 @@ function createBot(config, storage) {
     }
 
     queryingUsers.add(userId);
-    const status = await ctx.reply(
-      `开始查询 ${year}-${String(month).padStart(2, '0')}（0/${user.addresses.length}）...`
-    );
+    const monthLabel = `${year}-${String(month).padStart(2, '0')}`;
+    const status = await ctx.reply(`开始查询 ${monthLabel}（0/${user.addresses.length}）...`);
+
+    // 进度编辑与最终结果存在竞态：必须在结束后停掉进度，并等待进行中的 edit 完成
+    let progressActive = true;
+    let progressChain = Promise.resolve();
+
+    const editStatus = async (text) => {
+      try {
+        await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, text);
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
     try {
       let rate = resolveRate(user);
@@ -365,29 +377,30 @@ function createBot(config, storage) {
         concurrency: config.addressConcurrency,
         timeout: config.requestTimeoutMs,
         retries: config.maxRequestRetries,
-        onProgress: async (completed, total) => {
-          try {
-            await ctx.telegram.editMessageText(
-              ctx.chat.id,
-              status.message_id,
-              undefined,
-              `查询 ${year}-${String(month).padStart(2, '0')}：${completed}/${total} 个地址...`
-            );
-          } catch {
-            // 忽略频繁编辑失败
-          }
+        onProgress: (completed, total) => {
+          progressChain = progressChain
+            .then(async () => {
+              if (!progressActive) return;
+              await editStatus(`查询 ${monthLabel}：${completed}/${total} 个地址...`);
+            })
+            .catch(() => {});
         },
       });
 
+      progressActive = false;
+      await progressChain;
+
       let text = '';
       if (errors.length) {
-        text += errors.map((item) => `⚠️ ${item}`).join('\n') + '\n\n';
+        text += `${errors.map((item) => `⚠️ ${item}`).join('\n')}\n\n`;
       }
       text += summarizeRecords(records, totalText, rate, year, month);
       text += `\n\n汇率：1 USDT = ${Number(rate).toFixed(4)} 元`;
       if (user.excludeSelf) text += '\n已排除自有地址互转';
 
-      await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, text);
+      // 最终结果用新消息发送，避免被进度编辑覆盖；状态消息只标记完成
+      await editStatus(`查询完成 ${monthLabel}`);
+      await ctx.reply(text);
 
       if (exportCsv && records.length) {
         const { csv, filename } = buildCsv(records, year, month);
@@ -397,23 +410,19 @@ function createBot(config, storage) {
         });
       } else if (!exportCsv && records.length) {
         await ctx.reply(
-          `导出完整明细：/export ${year} ${month}`,
+          `如需完整明细文件：/export ${year} ${month}`,
           Markup.inlineKeyboard([
-            Markup.button.callback(
-              `导出 ${year}-${String(month).padStart(2, '0')} CSV`,
-              `export:${year}:${month}`
-            ),
+            Markup.button.callback(`导出 ${monthLabel} CSV`, `export:${year}:${month}`),
           ])
         );
       }
     } catch (error) {
+      progressActive = false;
+      await progressChain;
       console.error(error);
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        status.message_id,
-        undefined,
-        `查询失败：${error.message || error}`
-      );
+      const failText = `查询失败：${error.message || error}`;
+      const edited = await editStatus(failText);
+      if (!edited) await ctx.reply(failText);
     } finally {
       queryingUsers.delete(userId);
     }
