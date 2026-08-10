@@ -10,9 +10,10 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
 
-RUN mkdir -p /app/data && chown -R node:node /app
-USER node
+RUN mkdir -p /app/data
 
+# 以 root 运行，避免 VPS bind mount 目录权限导致无法写 users.json
+# （单机私有 bot 场景可接受；密钥仍只放在 .env / data 中）
 VOLUME ["/app/data"]
 
 CMD ["node", "src/index.js"]
