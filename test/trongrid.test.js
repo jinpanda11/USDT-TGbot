@@ -515,6 +515,20 @@ test('summarizeRecords：无记录时提示未找到', () => {
   assert.match(text, /未找到 USDT 入账记录/);
 });
 
+test('summarizeRecords：无导出提示（临时查询）时不出现导出指引', () => {
+  const records = Array.from({ length: 16 }, (_, index) => ({
+    label: '临时地址',
+    address: WALLET_A,
+    from: WALLET_B,
+    amountMicros: 1000000n,
+    timestamp: Date.UTC(2026, 6, 1, 4),
+    time: '2026-07-01 12:00:00',
+  }));
+  const text = summarizeRecords(records, 16000000n, 7.25, '2026-07', '');
+  assert.match(text, /另有 1 条未展示。/);
+  assert.doesNotMatch(text, /export/);
+});
+
 // ---------- CSV ----------
 
 test('buildCsv：包含 BOM、表头、引号转义与文件名', () => {

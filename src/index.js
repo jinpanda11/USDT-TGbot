@@ -67,6 +67,7 @@ async function main() {
     await bot.telegram.setMyCommands([
       { command: 'query', description: '查询本月收入' },
       { command: 'export', description: '导出本月 CSV' },
+      { command: 'temp', description: '临时查询某地址' },
       { command: 'menu', description: '打开按钮菜单' },
       { command: 'list', description: '查看地址列表' },
       { command: 'add', description: '添加地址' },

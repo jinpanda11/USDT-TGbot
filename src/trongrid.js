@@ -418,7 +418,8 @@ function summarizeRecords(records, totalMicros, rate, title, exportHint = '') {
     text += `${index + 1}. ${item.time} | ${formatUsdt(item.amountMicros)} USDT | ${item.from.slice(0, 6)}… → ${item.label}\n`;
   });
   if (records.length > 15) {
-    text += `\n… 另有 ${records.length - 15} 条未展示，${exportHint}`;
+    text += `\n… 另有 ${records.length - 15} 条未展示。`;
+    if (exportHint) text += ` ${exportHint}`;
   }
   return text;
 }

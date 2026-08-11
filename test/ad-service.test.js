@@ -160,10 +160,11 @@ test('非法广告条目被丢弃，合法广告仍可用', () => {
   assert.equal(service.getAdById('bad'), undefined);
 });
 
-test('运营编辑 ads.json 后重新加载（mtime 变化）', () => {
+test('运营编辑 ads.json 后重新加载（mtime 变化）', async () => {
   const service = makeService(dir, [makeAd({ id: 'old' })]);
   assert.equal(service.selectAd(NOW).id, 'old');
-  // 模拟运营修改：替换为新广告
+  // 模拟运营修改：替换为新广告（延时确保 mtime 变化）
+  await new Promise((resolve) => setTimeout(resolve, 15));
   writeAds(dir, [makeAd({ id: 'new' })]);
   assert.equal(service.selectAd(NOW).id, 'new');
 });
@@ -323,9 +324,10 @@ test('constructor：文件缺失用初始默认；文件显式 enabled 优先于
   assert.equal(fromFile.enabled, false);
 });
 
-test('运营编辑 ads.json 的 enabled 字段会被重新加载', () => {
+test('运营编辑 ads.json 的 enabled 字段会被重新加载', async () => {
   const service = makeService(dir, [makeAd()]);
   assert.equal(service.enabled, true);
+  await new Promise((resolve) => setTimeout(resolve, 15));
   writeAdsWithEnabled(dir, false, [makeAd()]);
   service.selectAd(NOW); // 触发 mtime 重载
   assert.equal(service.enabled, false);

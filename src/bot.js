@@ -23,6 +23,7 @@ const BTN = {
   EXPORT_MONTH: '📄 导出本月',
   ADDRESSES: '📋 地址管理',
   ADD_ADDR: '➕ 添加地址',
+  TEMP_QUERY: '🔍 临时查询',
   SETTINGS: '⚙️ 设置',
   HELP: '❓ 帮助',
   CANCEL: '❌ 取消',
@@ -31,8 +32,8 @@ const BTN = {
 const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.QUERY_MONTH, BTN.PICK_MONTH],
   [BTN.EXPORT_MONTH, BTN.ADDRESSES],
-  [BTN.ADD_ADDR, BTN.SETTINGS],
-  [BTN.HELP],
+  [BTN.TEMP_QUERY, BTN.ADD_ADDR],
+  [BTN.SETTINGS, BTN.HELP],
 ]).resize();
 
 const CANCEL_KEYBOARD = Markup.keyboard([[BTN.CANCEL]]).resize();
@@ -183,6 +184,7 @@ function createBot(config, storage, adService = null) {
       '📥 查询本月 — 查当前北京时间月份收入',
       '📅 选择月份 — 点选要查的月份',
       '📄 导出本月 — 导出当前月 CSV',
+      '🔍 临时查询 — 查任意地址的月收入（不加进地址管理）',
       '📋 地址管理 — 查看/删除地址',
       '➕ 添加地址 — 按提示添加',
       '⚙️ 设置 — API Key / 汇率 / 排除自转',
@@ -292,6 +294,54 @@ function createBot(config, storage, adService = null) {
     return Markup.inlineKeyboard(rows);
   }
 
+  // 临时查询：选择月份 / 年份
+  function tempMonthPickerKeyboard(year) {
+    const rows = [];
+    for (let start = 1; start <= 12; start += 3) {
+      rows.push(
+        [0, 1, 2].map((offset) => {
+          const m = start + offset;
+          return Markup.button.callback(`${m}月`, `tqm:${year}:${m}`);
+        })
+      );
+    }
+    rows.push([
+      Markup.button.callback(`${year - 1}年…`, `tpick:${year - 1}`),
+      Markup.button.callback('关闭', 'nav:close'),
+    ]);
+    return Markup.inlineKeyboard(rows);
+  }
+
+  function tempYearPickerKeyboard(year) {
+    const rows = [];
+    for (let start = 1; start <= 12; start += 3) {
+      rows.push(
+        [0, 1, 2].map((offset) => {
+          const m = start + offset;
+          return Markup.button.callback(`${m}月`, `tqm:${year}:${m}`);
+        })
+      );
+    }
+    rows.push([Markup.button.callback('« 返回今年', 'tpick:current')]);
+    return Markup.inlineKeyboard(rows);
+  }
+
+  async function startTempQuery(ctx) {
+    if (!assertPrivateChat(ctx)) return;
+    setSession(ctx.from.id, { type: 'temp_query', step: 'address' });
+    await ctx.reply(
+      [
+        '🔍 临时查询',
+        '',
+        '请输入您要查询的地址（T 开头，34 位）：',
+        '查询结果不会加入您的地址管理。',
+        '',
+        '点「❌ 取消」可退出。',
+      ].join('\n'),
+      CANCEL_KEYBOARD
+    );
+  }
+
   async function showAddresses(ctx) {
     if (!assertPrivateChat(ctx)) return;
     const user = storage.getUser(ctx.from.id);
@@ -399,7 +449,7 @@ function createBot(config, storage, adService = null) {
     await replyMain(ctx, `API Key 已保存：${maskApiKey(apiKey)}\n${probeText}`);
   }
 
-  async function runQuery(ctx, { period, exportCsv }) {
+  async function runQuery(ctx, { period, exportCsv, tempAddress }) {
     const userId = ctx.from.id;
     if (!assertPrivateChat(ctx)) return;
     if (queryingUsers.has(userId)) {
@@ -414,7 +464,7 @@ function createBot(config, storage, adService = null) {
     const user = storage.getUser(userId);
     const apiKey = resolveApiKey(user);
     // 未配置 API Key 时使用 TronGrid 公共接口（有限流），出错时提示注册免费 Key
-    if (!user.addresses.length) {
+    if (!tempAddress && !user.addresses.length) {
       await ctx.reply('请先添加地址。', {
         ...MAIN_KEYBOARD,
         ...Markup.inlineKeyboard([[Markup.button.callback('➕ 添加地址', 'nav:add')]]),
@@ -429,12 +479,18 @@ function createBot(config, storage, adService = null) {
       return;
     }
 
+    // 临时查询：只查单个地址，不加进地址管理，也不做排除自转
+    const wallets = tempAddress
+      ? [{ label: '临时地址', address: tempAddress }]
+      : user.addresses.map((item) => ({ ...item }));
+    const excludeSelf = tempAddress ? false : user.excludeSelf;
+
     queryingUsers.add(userId);
     const label = isYtd ? `${year} 年至今` : monthLabel(year, month);
-    const status = await ctx.reply(`开始查询 ${label}（0/${user.addresses.length}）...`, MAIN_KEYBOARD);
+    const status = await ctx.reply(`开始查询 ${label}（0/${wallets.length}）...`, MAIN_KEYBOARD);
     const startedAt = Date.now();
     const periodKey = isYtd ? `ytd:${year}` : `${year}:${month}`;
-    const cacheKey = `${userId}|${periodKey}|${user.excludeSelf}|${exportCsv}|${apiKey}`;
+    const cacheKey = `${userId}|${periodKey}|${excludeSelf}|${exportCsv}|${apiKey}|${tempAddress || ''}`;
     // YTD 的结束时间是“现在”，结果随时变化，不做缓存
     const cached = !exportCsv && !isYtd ? queryCache.get(cacheKey) : undefined;
     const cacheHit = Boolean(cached);
@@ -472,9 +528,9 @@ function createBot(config, storage, adService = null) {
           }
 
           const queryOptions = {
-            wallets: user.addresses.map((item) => ({ ...item })),
+            wallets,
             apiKey,
-            excludeSelf: user.excludeSelf,
+            excludeSelf,
             usdtContract: config.usdtContract,
             apiBase: config.trongridApiBase,
             concurrency: config.addressConcurrency,
@@ -513,12 +569,15 @@ function createBot(config, storage, adService = null) {
       let text = '';
       if (errors.length) text += `${errors.map((item) => `⚠️ ${item}`).join('\n')}\n\n`;
       if (warnings.length) text += `${warnings.map((item) => `⚠️ ${item}`).join('\n')}\n\n`;
-      const exportHint = isYtd
-        ? '可用 /export ytd 导出完整 CSV。'
-        : `可用 /export ${year} ${month} 导出完整 CSV。`;
+      const exportHint = tempAddress
+        ? ''
+        : isYtd
+          ? '可用 /export ytd 导出完整 CSV。'
+          : `可用 /export ${year} ${month} 导出完整 CSV。`;
       text += summarizeRecords(records, totalMicros, rate, label, exportHint);
       text += `\n\n汇率：1 USDT = ${Number(rate).toFixed(4)} 元`;
       if (user.excludeSelf) text += '\n已排除自有地址互转';
+      if (tempAddress) text += `\n\n📌 查询地址：${tempAddress}`;
 
       // 查询结果赞助位（阶段 A）：成功/部分成功时追加一条广告
       // 查询结果消息不挂常驻键盘，只在有广告按钮时附带内联按钮
@@ -572,7 +631,7 @@ function createBot(config, storage, adService = null) {
           source: Buffer.from(csv, 'utf8'),
           filename,
         });
-      } else if (!exportCsv && records.length) {
+      } else if (!exportCsv && !tempAddress && records.length) {
         const exportCallback = isYtd ? `export:y:${year}` : `export:m:${year}:${month}`;
         await ctx.reply('需要完整明细时，可点下方导出：', {
           ...Markup.inlineKeyboard([
@@ -732,6 +791,22 @@ function createBot(config, storage, adService = null) {
     await runQuery(ctx, { period, exportCsv: true });
   });
 
+  bot.command('temp', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
+    const address = (ctx.message.text.trim().split(/\s+/)[1] || '').trim();
+    if (!address) {
+      await startTempQuery(ctx);
+      return;
+    }
+    if (!isValidTronAddress(address)) {
+      await replyMain(ctx, '地址格式错误：应为 34 位且以 T 开头。');
+      return;
+    }
+    setSession(ctx.from.id, { type: 'temp_query', step: 'pick_month', data: { address } });
+    const { year } = getCurrentChinaYearMonth();
+    await ctx.reply(`✅ 地址校验通过：${address}\n\n请选择要查询的月份：`, tempMonthPickerKeyboard(year));
+  });
+
   bot.command('menu', async (ctx) => {
     clearSession(ctx.from.id);
     await replyMain(ctx, '主菜单已打开，直接点下方按钮即可。');
@@ -784,6 +859,10 @@ function createBot(config, storage, adService = null) {
     await startAddAddress(ctx);
   });
 
+  bot.hears(BTN.TEMP_QUERY, async (ctx) => {
+    await startTempQuery(ctx);
+  });
+
   bot.hears(BTN.SETTINGS, async (ctx) => {
     clearSession(ctx.from.id);
     await showSettings(ctx);
@@ -805,6 +884,18 @@ function createBot(config, storage, adService = null) {
 
     if (session.type === 'ad_new' && adAdmin) {
       return adAdmin.handleWizardText(ctx, session);
+    }
+
+    if (session.type === 'temp_query' && session.step === 'address') {
+      const address = text.trim();
+      if (!isValidTronAddress(address)) {
+        await ctx.reply('地址格式错误，请重新输入（T 开头，34 位），或点「❌ 取消」。', CANCEL_KEYBOARD);
+        return;
+      }
+      setSession(ctx.from.id, { type: 'temp_query', step: 'pick_month', data: { address } });
+      const { year } = getCurrentChinaYearMonth();
+      await ctx.reply(`✅ 地址校验通过：${address}\n\n请选择要查询的月份：`, tempMonthPickerKeyboard(year));
+      return;
     }
 
     if (session.type === 'add_address') {
@@ -1014,6 +1105,41 @@ function createBot(config, storage, adService = null) {
     const { year } = getCurrentChinaYearMonth();
     await ctx.answerCbQuery('开始查询今年总收入...');
     await runQuery(ctx, { period: { type: 'ytd', year }, exportCsv: false });
+  });
+
+  // 临时查询：选择月份 / 年份后查询临时地址
+  bot.action(/^tqm:(\d{4}):(\d{1,2})$/, async (ctx) => {
+    const year = Number.parseInt(ctx.match[1], 10);
+    const month = Number.parseInt(ctx.match[2], 10);
+    const session = getSession(ctx.from.id);
+    const address =
+      session?.type === 'temp_query' && session.step === 'pick_month' ? session.data?.address : undefined;
+    await ctx.answerCbQuery('开始查询...');
+    if (!address) {
+      clearSession(ctx.from.id);
+      await ctx.reply('临时查询已过期，请重新发起。', MAIN_KEYBOARD);
+      return;
+    }
+    clearSession(ctx.from.id);
+    await runQuery(ctx, {
+      period: { type: 'month', year, month },
+      exportCsv: false,
+      tempAddress: address,
+    });
+  });
+
+  bot.action(/^tpick:(current|\d{4})$/, async (ctx) => {
+    const yearToken = ctx.match[1];
+    const year =
+      yearToken === 'current' ? getCurrentChinaYearMonth().year : Number.parseInt(yearToken, 10);
+    await ctx.answerCbQuery();
+    const title = `选择 ${year} 年的月份：`;
+    const keyboard = yearToken === 'current' ? tempMonthPickerKeyboard(year) : tempYearPickerKeyboard(year);
+    try {
+      await ctx.editMessageText(title, keyboard);
+    } catch {
+      await ctx.reply(title, keyboard);
+    }
   });
 
   bot.action(/^export:(m|y):(\d{4})(?::(\d{1,2}))?$/, async (ctx) => {
