@@ -89,18 +89,25 @@ function getChinaMonthRange(year, month) {
   return { start, endExclusive };
 }
 
-function getCurrentChinaYearMonth() {
+function getCurrentChinaYearMonth(date = new Date()) {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', {
       timeZone: CHINA_TIME_ZONE,
       year: 'numeric',
       month: 'numeric',
     })
-      .formatToParts(new Date())
+      .formatToParts(date)
       .filter((part) => part.type !== 'literal')
       .map((part) => [part.type, Number(part.value)])
   );
   return { year: parts.year, month: parts.month };
+}
+
+/** 今年 1 月 1 日 00:00（北京时间）到指定时刻（默认现在）的查询范围 */
+function getYearToDateRange(now = Date.now()) {
+  const { year } = getCurrentChinaYearMonth(new Date(now));
+  const start = Date.UTC(year, 0, 1) - CHINA_UTC_OFFSET_MS;
+  return { year, start, endExclusive: now };
 }
 
 function formatUsdt(microUnits) {
@@ -111,11 +118,23 @@ function formatUsdt(microUnits) {
     .padStart(6, '0')}`;
 }
 
-function formatRequestError(error) {
+const NO_KEY_HINT =
+  '\n提示：您可前往 https://www.trongrid.io/ 注册免费账号，获取免费 API Key 后重试。';
+
+function formatRequestError(error, { noKeyHint = false } = {}) {
+  const hint = noKeyHint ? NO_KEY_HINT : '';
   if (error?.status === 401 || error?.status === 403) {
-    return 'API Key 无效或无权访问（请确认未带 <> 引号，并在 TronGrid 控制台复制完整 Key）';
+    return (
+      (noKeyHint
+        ? '访问被拒绝，公共接口可能需要注册。'
+        : 'API Key 无效或无权访问（请确认未带 <> 引号，并在 TronGrid 控制台复制完整 Key）') + hint
+    );
   }
-  if (error?.status === 429) return '请求过于频繁，重试后仍被限流';
+  if (error?.status === 429) {
+    return (
+      (noKeyHint ? '当前公共查询接口已限流。' : '请求过于频繁，重试后仍被限流') + hint
+    );
+  }
   if (error?.status >= 500) return `TronGrid 服务异常（HTTP ${error.status}）`;
   if (error?.code === 'TIMEOUT') return '请求超时，自动重试后仍未成功';
   if (error?.status) return `请求失败（HTTP ${error.status}）`;
@@ -184,8 +203,10 @@ async function fetchAllTransactions(url, apiKey, options = {}) {
     }
     seen.add(nextUrl);
     pageCount += 1;
+    // 未配置 API Key 时不发送请求头（使用公共接口，有限流）
+    const headers = apiKey ? { 'TRON-PRO-API-KEY': apiKey } : {};
     const response = await fetchJson(nextUrl, {
-      headers: { 'TRON-PRO-API-KEY': apiKey },
+      headers,
       timeout: options.timeout,
       retries: options.retries,
     });
@@ -220,10 +241,8 @@ async function fetchUsdtCnyRate(url, options = {}) {
   return rate;
 }
 
-async function queryMonthIncome({
+async function queryIncomeRange({
   wallets,
-  year,
-  month,
   apiKey,
   excludeSelf,
   usdtContract,
@@ -236,9 +255,10 @@ async function queryMonthIncome({
   totalTimeoutMs = 0,
   onProgress,
   logger,
+  start,
+  endExclusive,
 }) {
   const ownAddresses = new Set(wallets.map((item) => item.address));
-  const { start, endExclusive } = getChinaMonthRange(year, month);
   const contractLower = String(usdtContract).toLowerCase();
   const records = [];
   const errors = [];
@@ -326,7 +346,9 @@ async function queryMonthIncome({
           error: error.message,
         });
       }
-      errors.push(`地址 ${maskAddress(wallet.address)} 查询失败：${formatRequestError(error)}`);
+      errors.push(
+        `地址 ${maskAddress(wallet.address)} 查询失败：${formatRequestError(error, { noKeyHint: !apiKey })}`
+      );
     } finally {
       completed += 1;
       if (onProgress) onProgress(completed, wallets.length);
@@ -351,25 +373,36 @@ async function queryMonthIncome({
   };
 }
 
+/** 按月份查询（北京时间某月 1 日 00:00 至下月 1 日 00:00） */
+async function queryMonthIncome(options) {
+  const { start, endExclusive } = getChinaMonthRange(options.year, options.month);
+  return queryIncomeRange({ ...options, start, endExclusive });
+}
+
+/** 今年至今：当年 1 月 1 日 00:00（北京时间）到当前时刻，跨年自动从新一年 1 月 1 日起算 */
+async function queryYearToDate(options) {
+  const { start, endExclusive } = getYearToDateRange();
+  return queryIncomeRange({ ...options, start, endExclusive });
+}
+
 // ---------- 展示 ----------
 
-function buildCsv(records, year, month) {
+function buildCsv(records, year, month, suffix) {
   const rows = [['标签', '收款地址', '付款地址', '金额 (USDT)', '时间']];
   records.forEach((item) => {
     rows.push([item.label, item.address, item.from, formatUsdt(item.amountMicros), item.time]);
   });
   const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`;
-  const filename = `usdt_income_${year}-${String(month).padStart(2, '0')}.csv`;
+  const part = suffix !== undefined ? suffix : String(month).padStart(2, '0');
+  const filename = `usdt_income_${year}-${part}.csv`;
   return { csv, filename };
 }
 
-function summarizeRecords(records, totalMicros, rate, year, month) {
-  const totalText = formatUsdt(totalMicros);
+function summarizeRecords(records, totalMicros, rate, title, exportHint = '') {
   const totalCny = (Number(totalMicros) / 1e6) * rate;
-  const monthText = `${year}-${String(month).padStart(2, '0')}`;
   let text = [
-    `📊 ${monthText} 收入汇总（北京时间）`,
-    `合计：${totalText} USDT`,
+    `📊 ${title} 收入汇总（北京时间）`,
+    `合计：${formatUsdt(totalMicros)} USDT`,
     `约合：¥${totalCny.toFixed(2)}`,
     `笔数：${records.length}`,
   ].join('\n');
@@ -385,7 +418,7 @@ function summarizeRecords(records, totalMicros, rate, year, month) {
     text += `${index + 1}. ${item.time} | ${formatUsdt(item.amountMicros)} USDT | ${item.from.slice(0, 6)}… → ${item.label}\n`;
   });
   if (records.length > 15) {
-    text += `\n… 另有 ${records.length - 15} 条未展示，可用 /export ${year} ${month} 导出完整 CSV。`;
+    text += `\n… 另有 ${records.length - 15} 条未展示，${exportHint}`;
   }
   return text;
 }
@@ -418,13 +451,16 @@ module.exports = {
   isValidTronAddress,
   base58Decode,
   getChinaMonthRange,
+  getYearToDateRange,
   getCurrentChinaYearMonth,
   formatUsdt,
   formatRequestError,
   fetchJson,
   fetchAllTransactions,
   fetchUsdtCnyRate,
+  queryIncomeRange,
   queryMonthIncome,
+  queryYearToDate,
   probeApiKey,
   buildCsv,
   summarizeRecords,

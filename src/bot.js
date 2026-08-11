@@ -6,6 +6,7 @@ const {
   getCurrentChinaYearMonth,
   fetchUsdtCnyRate,
   queryMonthIncome,
+  queryYearToDate,
   probeApiKey,
   buildCsv,
   summarizeRecords,
@@ -32,24 +33,32 @@ const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.EXPORT_MONTH, BTN.ADDRESSES],
   [BTN.ADD_ADDR, BTN.SETTINGS],
   [BTN.HELP],
-])
-  .resize()
-  .persistent();
+]).resize();
 
 const CANCEL_KEYBOARD = Markup.keyboard([[BTN.CANCEL]]).resize();
 
-function parseYearMonth(args, fallback) {
-  if (!args.length) return { year: fallback.year, month: fallback.month };
+/**
+ * 解析 /query 或 /export 的参数。
+ * 返回 period：{ type: 'month', year, month } 或 { type: 'ytd', year }。
+ * 'ytd' / '今年' 表示今年 1 月 1 日至今。
+ */
+function parsePeriod(args, fallback) {
+  if (!args.length) return { type: 'month', year: fallback.year, month: fallback.month };
+  const first = String(args[0]).toLowerCase();
+  if (first === 'ytd' || first === '今年') {
+    return { type: 'ytd', year: fallback.year };
+  }
   if (args.length === 1) {
     const value = args[0];
     if (/^\d{4}-\d{1,2}$/.test(value)) {
       const [y, m] = value.split('-').map((part) => Number.parseInt(part, 10));
-      return { year: y, month: m };
+      return { type: 'month', year: y, month: m };
     }
     const month = Number.parseInt(value, 10);
-    return { year: fallback.year, month };
+    return { type: 'month', year: fallback.year, month };
   }
   return {
+    type: 'month',
     year: Number.parseInt(args[0], 10),
     month: Number.parseInt(args[1], 10),
   };
@@ -168,7 +177,9 @@ function createBot(config, storage, adService = null) {
     return [
       'TRON USDT 链上收入分析',
       '',
-      '直接点下方按钮即可，不用记命令：',
+      '所有命令已收进输入框左侧的「📋 菜单」按钮。',
+      '点 /start 或 /menu，聊天窗口里会弹出快捷按钮，用完自动收起。',
+      '',
       '📥 查询本月 — 查当前北京时间月份收入',
       '📅 选择月份 — 点选要查的月份',
       '📄 导出本月 — 导出当前月 CSV',
@@ -179,7 +190,7 @@ function createBot(config, storage, adService = null) {
       '高级用户仍可用命令：/query /export /add /list /setkey ...',
       configHasDefaultKey
         ? '服务器已配置默认 TronGrid API Key，也可自己设置。'
-        : '请先在「设置」里配置 TronGrid API Key。',
+        : '未配置 API Key 时使用公共接口（有频率限制）。若查询被限流，可在「设置」里添加从 trongrid.io 注册的免费 Key。',
     ].join('\n');
   }
 
@@ -245,7 +256,9 @@ function createBot(config, storage, adService = null) {
   function monthPickerKeyboard(exportMode = false) {
     const { year, month } = getCurrentChinaYearMonth();
     const prefix = exportMode ? 'exm' : 'qm';
-    const rows = [];
+    const rows = [
+      [Markup.button.callback(`📊 今年总收入（${year} 年至今）`, 'ytd:current')],
+    ];
     // 当前年 12 个月
     for (let start = 1; start <= 12; start += 3) {
       rows.push(
@@ -386,7 +399,7 @@ function createBot(config, storage, adService = null) {
     await replyMain(ctx, `API Key 已保存：${maskApiKey(apiKey)}\n${probeText}`);
   }
 
-  async function runQuery(ctx, { year, month, exportCsv }) {
+  async function runQuery(ctx, { period, exportCsv }) {
     const userId = ctx.from.id;
     if (!assertPrivateChat(ctx)) return;
     if (queryingUsers.has(userId)) {
@@ -400,13 +413,7 @@ function createBot(config, storage, adService = null) {
 
     const user = storage.getUser(userId);
     const apiKey = resolveApiKey(user);
-    if (!apiKey) {
-      await ctx.reply('请先在「⚙️ 设置」里配置 TronGrid API Key。', {
-        ...MAIN_KEYBOARD,
-        ...Markup.inlineKeyboard([[Markup.button.callback('🔑 去设置 API Key', 'set:apikey')]]),
-      });
-      return;
-    }
+    // 未配置 API Key 时使用 TronGrid 公共接口（有限流），出错时提示注册免费 Key
     if (!user.addresses.length) {
       await ctx.reply('请先添加地址。', {
         ...MAIN_KEYBOARD,
@@ -414,17 +421,22 @@ function createBot(config, storage, adService = null) {
       });
       return;
     }
-    if (!validateYearMonth(year, month)) {
+    const isYtd = period.type === 'ytd';
+    const year = period.year;
+    const month = period.month;
+    if (!isYtd && !validateYearMonth(year, month)) {
       await ctx.reply('年月无效，请重新选择。', MAIN_KEYBOARD);
       return;
     }
 
     queryingUsers.add(userId);
-    const label = monthLabel(year, month);
+    const label = isYtd ? `${year} 年至今` : monthLabel(year, month);
     const status = await ctx.reply(`开始查询 ${label}（0/${user.addresses.length}）...`, MAIN_KEYBOARD);
     const startedAt = Date.now();
-    const cacheKey = `${userId}|${year}|${month}|${user.excludeSelf}|${exportCsv}|${apiKey}`;
-    const cached = !exportCsv ? queryCache.get(cacheKey) : undefined;
+    const periodKey = isYtd ? `ytd:${year}` : `${year}:${month}`;
+    const cacheKey = `${userId}|${periodKey}|${user.excludeSelf}|${exportCsv}|${apiKey}`;
+    // YTD 的结束时间是“现在”，结果随时变化，不做缓存
+    const cached = !exportCsv && !isYtd ? queryCache.get(cacheKey) : undefined;
     const cacheHit = Boolean(cached);
 
     let progressActive = true;
@@ -459,10 +471,8 @@ function createBot(config, storage, adService = null) {
             logger.warn('rate.fetch.failed', { error: error.message });
           }
 
-          const result = await queryMonthIncome({
+          const queryOptions = {
             wallets: user.addresses.map((item) => ({ ...item })),
-            year,
-            month,
             apiKey,
             excludeSelf: user.excludeSelf,
             usdtContract: config.usdtContract,
@@ -482,9 +492,12 @@ function createBot(config, storage, adService = null) {
                 .catch(() => {});
             },
             logger,
-          });
+          };
+          const result = isYtd
+            ? await queryYearToDate(queryOptions)
+            : await queryMonthIncome({ ...queryOptions, year, month });
           ({ records, errors, warnings, deduped, totalMicros } = result);
-          if (!exportCsv && records.length <= 1000) {
+          if (!exportCsv && !isYtd && records.length <= 1000) {
             queryCache.set(cacheKey, { records, errors, warnings, deduped, totalMicros, rate });
           }
         } finally {
@@ -500,13 +513,17 @@ function createBot(config, storage, adService = null) {
       let text = '';
       if (errors.length) text += `${errors.map((item) => `⚠️ ${item}`).join('\n')}\n\n`;
       if (warnings.length) text += `${warnings.map((item) => `⚠️ ${item}`).join('\n')}\n\n`;
-      text += summarizeRecords(records, totalMicros, rate, year, month);
+      const exportHint = isYtd
+        ? '可用 /export ytd 导出完整 CSV。'
+        : `可用 /export ${year} ${month} 导出完整 CSV。`;
+      text += summarizeRecords(records, totalMicros, rate, label, exportHint);
       text += `\n\n汇率：1 USDT = ${Number(rate).toFixed(4)} 元`;
       if (user.excludeSelf) text += '\n已排除自有地址互转';
 
       // 查询结果赞助位（阶段 A）：成功/部分成功时追加一条广告
+      // 查询结果消息不挂常驻键盘，只在有广告按钮时附带内联按钮
       let replyText = text;
-      let replyExtra = MAIN_KEYBOARD;
+      let replyExtra = {};
       let shownAd = null;
       if (adService && adService.enabled) {
         try {
@@ -514,7 +531,8 @@ function createBot(config, storage, adService = null) {
             const ad = adService.selectAd();
             if (ad) {
               replyText = `${text}\n${renderText(ad)}`;
-              replyExtra = { ...MAIN_KEYBOARD, ...renderKeyboard(ad) };
+              const adKeyboard = renderKeyboard(ad);
+              if (adKeyboard) replyExtra = adKeyboard;
               shownAd = ad;
             }
           }
@@ -549,18 +567,16 @@ function createBot(config, storage, adService = null) {
       });
 
       if (exportCsv && records.length) {
-        const { csv, filename } = buildCsv(records, year, month);
+        const { csv, filename } = buildCsv(records, year, isYtd ? 'ytd' : month);
         await ctx.replyWithDocument({
           source: Buffer.from(csv, 'utf8'),
           filename,
         });
       } else if (!exportCsv && records.length) {
+        const exportCallback = isYtd ? `export:y:${year}` : `export:m:${year}:${month}`;
         await ctx.reply('需要完整明细时，可点下方导出：', {
-          ...MAIN_KEYBOARD,
           ...Markup.inlineKeyboard([
-            [
-              Markup.button.callback(`📄 导出 ${label} CSV`, `export:${year}:${month}`),
-            ],
+            [Markup.button.callback(`📄 导出 ${label} CSV`, exportCallback)],
           ]),
         });
       }
@@ -705,15 +721,15 @@ function createBot(config, storage, adService = null) {
   bot.command('query', async (ctx) => {
     const args = ctx.message.text.trim().split(/\s+/).slice(1);
     const current = getCurrentChinaYearMonth();
-    const { year, month } = parseYearMonth(args, current);
-    await runQuery(ctx, { year, month, exportCsv: false });
+    const period = parsePeriod(args, current);
+    await runQuery(ctx, { period, exportCsv: false });
   });
 
   bot.command('export', async (ctx) => {
     const args = ctx.message.text.trim().split(/\s+/).slice(1);
     const current = getCurrentChinaYearMonth();
-    const { year, month } = parseYearMonth(args, current);
-    await runQuery(ctx, { year, month, exportCsv: true });
+    const period = parsePeriod(args, current);
+    await runQuery(ctx, { period, exportCsv: true });
   });
 
   bot.command('menu', async (ctx) => {
@@ -735,13 +751,19 @@ function createBot(config, storage, adService = null) {
   bot.hears(BTN.QUERY_MONTH, async (ctx) => {
     clearSession(ctx.from.id);
     const current = getCurrentChinaYearMonth();
-    await runQuery(ctx, { year: current.year, month: current.month, exportCsv: false });
+    await runQuery(ctx, {
+      period: { type: 'month', year: current.year, month: current.month },
+      exportCsv: false,
+    });
   });
 
   bot.hears(BTN.EXPORT_MONTH, async (ctx) => {
     clearSession(ctx.from.id);
     const current = getCurrentChinaYearMonth();
-    await runQuery(ctx, { year: current.year, month: current.month, exportCsv: true });
+    await runQuery(ctx, {
+      period: { type: 'month', year: current.year, month: current.month },
+      exportCsv: true,
+    });
   });
 
   bot.hears(BTN.PICK_MONTH, async (ctx) => {
@@ -984,14 +1006,25 @@ function createBot(config, storage, adService = null) {
     const year = Number.parseInt(ctx.match[2], 10);
     const month = Number.parseInt(ctx.match[3], 10);
     await ctx.answerCbQuery(exportCsv ? '开始导出...' : '开始查询...');
-    await runQuery(ctx, { year, month, exportCsv });
+    await runQuery(ctx, { period: { type: 'month', year, month }, exportCsv });
   });
 
-  bot.action(/^export:(\d{4}):(\d{1,2})$/, async (ctx) => {
-    const year = Number.parseInt(ctx.match[1], 10);
-    const month = Number.parseInt(ctx.match[2], 10);
+  // 今年总收入：当年 1 月 1 日（北京时间）至当前时刻
+  bot.action('ytd:current', async (ctx) => {
+    const { year } = getCurrentChinaYearMonth();
+    await ctx.answerCbQuery('开始查询今年总收入...');
+    await runQuery(ctx, { period: { type: 'ytd', year }, exportCsv: false });
+  });
+
+  bot.action(/^export:(m|y):(\d{4})(?::(\d{1,2}))?$/, async (ctx) => {
+    const mode = ctx.match[1];
+    const year = Number.parseInt(ctx.match[2], 10);
+    const month = ctx.match[3] ? Number.parseInt(ctx.match[3], 10) : undefined;
     await ctx.answerCbQuery('开始导出...');
-    await runQuery(ctx, { year, month, exportCsv: true });
+    await runQuery(ctx, {
+      period: mode === 'y' ? { type: 'ytd', year } : { type: 'month', year, month },
+      exportCsv: true,
+    });
   });
 
   // ---------- 广告点击 ----------

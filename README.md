@@ -11,6 +11,11 @@
 - 导出 CSV
 - 按 Telegram 用户隔离数据（`data/users.json`）
 
+## 界面
+
+- 所有命令收进输入框左侧的「📋 菜单」按钮（`setMyCommands` 自动配置）。
+- 点 `/start` 或 `/menu` 才会在聊天窗口弹出快捷按钮，非常驻、用完自动收起（不霸占屏幕）。
+
 ## 命令
 
 | 命令 | 说明 |
@@ -20,8 +25,8 @@
 | `/add <地址> [标签]` | 添加地址 |
 | `/list` | 地址列表 |
 | `/del <序号或地址>` | 删除地址 |
-| `/query [年] [月]` | 查询月收入（默认当月） |
-| `/export [年] [月]` | 查询并导出 CSV |
+| `/query [年] [月]` | 查询月收入（默认当月）；`/query ytd` 查今年 1 月 1 日至今 |
+| `/export [年] [月]` | 查询并导出 CSV；`/export ytd` 导出今年至今 |
 | `/rate [值\|live\|clear]` | 汇率 |
 | `/exclude on\|off` | 排除自转开关 |
 
@@ -162,7 +167,7 @@ docker run --rm -v "$PWD/data:/app/data" --env-file .env \
 | 变量 | 必填 | 说明 |
 |------|------|------|
 | `TELEGRAM_BOT_TOKEN` | 是 | BotFather 发放的 Token |
-| `TRONGRID_API_KEY` | 否 | 服务器默认 Key |
+| `TRONGRID_API_KEY` | 否 | 服务器默认 Key；**不配置也可查询**（走公共接口，有限流），出错时提示用户注册免费 Key |
 | `DATA_DIR` | 否 | 默认 `./data`（容器内 `/app/data`） |
 | `DEFAULT_USDT_CNY_RATE` | 否 | 默认 `7.20` |
 | `ADDRESS_CONCURRENCY` | 否 | 默认 `3`（1-20） |

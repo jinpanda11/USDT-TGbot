@@ -7,12 +7,15 @@ const {
   isValidTronAddress,
   base58Decode,
   getChinaMonthRange,
+  getYearToDateRange,
   formatUsdt,
   formatRequestError,
   fetchJson,
   fetchAllTransactions,
   fetchUsdtCnyRate,
+  queryIncomeRange,
   queryMonthIncome,
+  queryYearToDate,
   probeApiKey,
   buildCsv,
   summarizeRecords,
@@ -130,6 +133,14 @@ test('getChinaMonthRange：2026-01 月初/月末为北京时间 00:00', () => {
 test('getChinaMonthRange：闰年二月月末 29 日', () => {
   const { endExclusive } = getChinaMonthRange(2024, 2);
   assert.equal(endExclusive, Date.UTC(2024, 1, 29, 16)); // 2024-03-01 00:00 CST
+});
+
+test('getYearToDateRange：今年 1 月 1 日 00:00（北京）到指定时刻', () => {
+  const now = Date.UTC(2026, 6, 15, 4); // 2026-07-15 12:00 北京
+  const { year, start, endExclusive } = getYearToDateRange(now);
+  assert.equal(year, 2026);
+  assert.equal(start, Date.UTC(2026, 0, 1) - 8 * 60 * 60 * 1000);
+  assert.equal(endExclusive, now);
 });
 
 // ---------- 金额格式化 ----------
@@ -405,6 +416,54 @@ test('queryMonthIncome：记录按时间排序', async () => {
   assert.ok(result.records[0].timestamp < result.records[1].timestamp);
 });
 
+test('queryYearToDate：只统计今年 1 月 1 日至今的交易', async () => {
+  const lastYearTx = makeTx({ transaction_id: 'old', block_timestamp: Date.UTC(2025, 11, 31, 12) }); // 2025-12-31 20:00 北京
+  const inYearTx = makeTx({ transaction_id: 'in', block_timestamp: Date.now() - 3600000 }); // 1 小时前
+  globalThis.fetch = async () => jsonResponse({ data: [lastYearTx, inYearTx], meta: {} });
+  const result = await queryYearToDate(defaultQueryOptions());
+  assert.equal(result.records.length, 1);
+  assert.equal(result.totalText, '1.000000');
+});
+
+test('queryIncomeRange：自定义起止时间直接过滤', async () => {
+  const inside = makeTx({ transaction_id: 'in', block_timestamp: Date.UTC(2026, 2, 15, 4) });
+  const outside = makeTx({ transaction_id: 'out', block_timestamp: Date.UTC(2026, 3, 15, 4) });
+  globalThis.fetch = async () => jsonResponse({ data: [inside, outside], meta: {} });
+  const result = await queryIncomeRange({
+    ...defaultQueryOptions(),
+    start: Date.UTC(2026, 0, 1) - 8 * 60 * 60 * 1000,
+    endExclusive: Date.UTC(2026, 2, 31, 16), // 2026-04-01 00:00 北京
+  });
+  assert.equal(result.records.length, 1);
+});
+
+test('queryMonthIncome：未配置 Key 时不发送 API Key 请求头', async () => {
+  let capturedHeaders;
+  globalThis.fetch = async (url, init) => {
+    capturedHeaders = init.headers;
+    return jsonResponse({ data: [], meta: {} });
+  };
+  const result = await queryMonthIncome({ ...defaultQueryOptions(), apiKey: '' });
+  assert.equal(capturedHeaders['TRON-PRO-API-KEY'], undefined);
+  assert.equal(result.records.length, 0);
+  assert.deepEqual(result.errors, []);
+});
+
+test('queryMonthIncome：未配置 Key 遇 429 报错含注册提示', async () => {
+  globalThis.fetch = async () => jsonResponse({}, 429);
+  const result = await queryMonthIncome({ ...defaultQueryOptions(), apiKey: '' });
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /限流/);
+  assert.match(result.errors[0], /trongrid\.io/);
+});
+
+test('queryMonthIncome：配置 Key 后 429 不显示注册提示', async () => {
+  globalThis.fetch = async () => jsonResponse({}, 429);
+  const result = await queryMonthIncome(defaultQueryOptions());
+  assert.match(result.errors[0], /限流/);
+  assert.doesNotMatch(result.errors[0], /trongrid\.io/);
+});
+
 // ---------- 汇率与汇总 ----------
 
 test('fetchUsdtCnyRate：解析 CoinGecko 响应', async () => {
@@ -430,14 +489,29 @@ test('summarizeRecords：超大金额不产生精度损失', () => {
     },
   ];
   const totalMicros = 12345678901234567890n;
-  const text = summarizeRecords(records, totalMicros, 7.25, 2026, 1);
+  const text = summarizeRecords(records, totalMicros, 7.25, '2026-01', '可用 /export 2026 1 导出完整 CSV。');
   assert.match(text, /12345678901234\.567890 USDT/);
   assert.match(text, /约合：¥/);
   assert.match(text, /笔数：1/);
 });
 
+test('summarizeRecords：标题与导出提示可定制（YTD）', () => {
+  const records = Array.from({ length: 16 }, (_, index) => ({
+    label: `钱包${index}`,
+    address: WALLET_A,
+    from: WALLET_B,
+    amountMicros: 1000000n,
+    timestamp: Date.UTC(2026, 6, 1, 4),
+    time: '2026-07-01 12:00:00',
+  }));
+  const text = summarizeRecords(records, 16000000n, 7.25, '2026 年至今', '可用 /export ytd 导出完整 CSV。');
+  assert.match(text, /2026 年至今 收入汇总/);
+  assert.match(text, /可用 \/export ytd/);
+  assert.match(text, /另有 1 条未展示/);
+});
+
 test('summarizeRecords：无记录时提示未找到', () => {
-  const text = summarizeRecords([], 0n, 7.25, 2026, 1);
+  const text = summarizeRecords([], 0n, 7.25, '2026-01', '');
   assert.match(text, /未找到 USDT 入账记录/);
 });
 
@@ -458,6 +532,11 @@ test('buildCsv：包含 BOM、表头、引号转义与文件名', () => {
   assert.ok(csv.includes('"标签","收款地址","付款地址","金额 (USDT)","时间"'));
   assert.ok(csv.includes('"钱包,一"'));
   assert.equal(filename, 'usdt_income_2026-01.csv');
+});
+
+test('buildCsv：YTD 文件名', () => {
+  const { filename } = buildCsv([], 2026, undefined, 'ytd');
+  assert.equal(filename, 'usdt_income_2026-ytd.csv');
 });
 
 // ---------- 探测 ----------
@@ -490,4 +569,11 @@ test('formatRequestError：常见状态映射', () => {
   assert.match(formatRequestError({ status: 500 }), /服务异常/);
   assert.match(formatRequestError({ code: 'TIMEOUT' }), /超时/);
   assert.match(formatRequestError({}), /网络或接口异常/);
+});
+
+test('formatRequestError：无 Key 时限流/拒绝提示注册', () => {
+  assert.match(formatRequestError({ status: 429 }, { noKeyHint: true }), /trongrid\.io/);
+  assert.match(formatRequestError({ status: 403 }, { noKeyHint: true }), /trongrid\.io/);
+  assert.doesNotMatch(formatRequestError({ status: 429 }), /trongrid\.io/);
+  assert.doesNotMatch(formatRequestError({ status: 500 }, { noKeyHint: true }), /trongrid\.io/);
 });

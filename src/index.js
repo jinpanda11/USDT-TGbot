@@ -61,6 +61,26 @@ async function main() {
 
   await bot.launch();
   logger.info('bot.launched', {});
+
+  // 设置「M」菜单按钮：命令收进输入框左侧的菜单，/start 或 /menu 才弹出按钮键盘
+  try {
+    await bot.telegram.setMyCommands([
+      { command: 'query', description: '查询本月收入' },
+      { command: 'export', description: '导出本月 CSV' },
+      { command: 'menu', description: '打开按钮菜单' },
+      { command: 'list', description: '查看地址列表' },
+      { command: 'add', description: '添加地址' },
+      { command: 'setkey', description: '设置 API Key' },
+      { command: 'rate', description: '设置汇率' },
+      { command: 'exclude', description: '排除自转开关' },
+      { command: 'help', description: '帮助' },
+    ]);
+    await bot.telegram.setChatMenuButton({ type: 'commands', text: '📋 菜单' });
+    logger.info('menu.configured', {});
+  } catch (error) {
+    logger.warn('menu.setup.failed', { error: error.message });
+  }
+
   console.log('USDT 收入分析 Bot 已启动（long polling）');
 }
 
