@@ -270,7 +270,7 @@ docker run --rm -v "$PWD/data:/app/data" --env-file .env \
 ├── docker-compose.yml
 ├── .github/workflows/docker-publish.yml
 ├── .env.example
-└── usdt-收入分析.html   # 原网页版（保留）
+└── usdt-收入分析.html   # ⚠️ 已弃用：原网页版（功能已被 Telegram Bot 完全替代，保留仅供参考）
 ```
 
 ## 安全建议

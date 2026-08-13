@@ -29,6 +29,12 @@ const BTN = {
   CANCEL: '❌ 取消',
 };
 
+// 其他固定文案
+const TEXT = {
+  MENU_BUTTON: '📋 菜单',
+  SPONSOR_LABEL: '📢赞助内容',
+};
+
 const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.QUERY_MONTH, BTN.PICK_MONTH],
   [BTN.EXPORT_MONTH, BTN.ADDRESSES],
@@ -100,6 +106,12 @@ function createBot(config, storage, adService = null) {
   const queryCache = new QueryCache(config.queryCacheTtlMs, 50);
   /** @type {Map<number, { type: string, step?: string, data?: any, createdAt: number }>} */
   const sessions = new Map();
+  const MAX_SESSIONS = 1000; // 会话上限，防止恶意用户无限开会话
+  
+  // 汇率缓存：5分钟TTL，避免并发查询时重复请求 CoinGecko
+  let cachedRate = null;
+  let rateExpiry = 0;
+  const RATE_CACHE_TTL = 300000; // 5分钟
 
   // 会话过期清理
   const sessionTimer = setInterval(() => {
@@ -107,6 +119,14 @@ function createBot(config, storage, adService = null) {
     const now = Date.now();
     for (const [userId, session] of sessions) {
       if (now - session.createdAt > config.sessionTtlMs) sessions.delete(userId);
+    }
+    // 超过上限时，清理最老的会话
+    if (sessions.size > MAX_SESSIONS) {
+      const sorted = Array.from(sessions.entries()).sort((a, b) => a[1].createdAt - b[1].createdAt);
+      const toDelete = sorted.slice(0, sessions.size - MAX_SESSIONS);
+      for (const [userId] of toDelete) {
+        sessions.delete(userId);
+      }
     }
   }, 60000);
   sessionTimer.unref?.();
@@ -518,11 +538,20 @@ function createBot(config, storage, adService = null) {
         await querySemaphore.acquire();
         try {
           try {
-            const live = await fetchUsdtCnyRate(config.coingeckoRateUrl, {
-              timeout: 10000,
-              retries: config.maxRequestRetries,
-            });
-            if (!Number.isFinite(user.usdtRate) || user.usdtRate <= 0) rate = live;
+            const now = Date.now();
+            if (cachedRate && now < rateExpiry) {
+              // 使用缓存的汇率
+              if (!Number.isFinite(user.usdtRate) || user.usdtRate <= 0) rate = cachedRate;
+            } else {
+              // 缓存过期或不存在，重新获取
+              const live = await fetchUsdtCnyRate(config.coingeckoRateUrl, {
+                timeout: 10000,
+                retries: config.maxRequestRetries,
+              });
+              cachedRate = live;
+              rateExpiry = now + RATE_CACHE_TTL;
+              if (!Number.isFinite(user.usdtRate) || user.usdtRate <= 0) rate = live;
+            }
           } catch (error) {
             logger.warn('rate.fetch.failed', { error: error.message });
           }

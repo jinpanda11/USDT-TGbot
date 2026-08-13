@@ -30,11 +30,14 @@ class RateLimiter {
     this.maxPerWindow = maxPerWindow;
     this.windowMs = windowMs;
     this.hits = new Map(); // userId -> timestamp[]
+    this.lastCleanup = Date.now();
+    this.cleanupInterval = Math.max(windowMs * 2, 120000); // 至少2倍窗口或2分钟
   }
 
   allow(userId) {
     if (this.maxPerWindow <= 0) return true;
     const now = Date.now();
+    this.maybeCleanup(now);
     const cutoff = now - this.windowMs;
     const timestamps = (this.hits.get(userId) || []).filter((t) => t > cutoff);
     if (timestamps.length >= this.maxPerWindow) {
@@ -44,6 +47,20 @@ class RateLimiter {
     timestamps.push(now);
     this.hits.set(userId, timestamps);
     return true;
+  }
+
+  maybeCleanup(now) {
+    if (now - this.lastCleanup < this.cleanupInterval) return;
+    this.lastCleanup = now;
+    const cutoff = now - this.windowMs;
+    for (const [userId, timestamps] of this.hits) {
+      const active = timestamps.filter((t) => t > cutoff);
+      if (active.length === 0) {
+        this.hits.delete(userId);
+      } else {
+        this.hits.set(userId, active);
+      }
+    }
   }
 
   reset(userId) {

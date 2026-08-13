@@ -59,6 +59,23 @@ async function main() {
   process.once('SIGINT', () => stop('SIGINT'));
   process.once('SIGTERM', () => stop('SIGTERM'));
 
+  // 未捕获异常兜底：记录后优雅退出
+  process.once('uncaughtException', (error) => {
+    logger.error('uncaughtException', {
+      error: error.message,
+      stack: error.stack,
+    });
+    stop('uncaughtException').catch(() => process.exit(1));
+  });
+
+  process.once('unhandledRejection', (reason) => {
+    logger.error('unhandledRejection', {
+      reason: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+    stop('unhandledRejection').catch(() => process.exit(1));
+  });
+
   await bot.launch();
   logger.info('bot.launched', {});
 

@@ -18,6 +18,7 @@ class Storage {
     // 兼容：logger 提供 error/warn/info；不传时回退到 console
     this.logger = logger || console;
     this.users = {};
+    this.writeQueue = Promise.resolve(); // 写队列：串行化所有 save() 操作
     this.ensureDataDir();
     this.load();
   }
@@ -108,6 +109,17 @@ class Storage {
   }
 
   save() {
+    // 所有写操作排队，防止并发写竞态
+    this.writeQueue = this.writeQueue
+      .then(() => this._doSave())
+      .catch((error) => {
+        this.logger.error?.('storage.save.failed', { error: error.message });
+        throw error;
+      });
+    return this.writeQueue;
+  }
+
+  _doSave() {
     const serialized = JSON.stringify(this.users, null, 2);
     // 安全阀：不允许把已有数据的文件用空对象覆盖（防误清空）
     if (serialized === '{}' && fs.existsSync(this.filePath)) {

@@ -30,7 +30,7 @@ jobs:
         run: npm run check
 
       - name: Run tests
-        run: npm test
+        run: npm test -- --experimental-test-coverage
 
   build-and-push:
     needs: test

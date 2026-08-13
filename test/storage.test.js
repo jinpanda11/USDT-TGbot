@@ -17,18 +17,20 @@ function makeTempDir(t) {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'usdt-storage-test-'));
 }
 
-test('首次创建：生成空 users.json', () => {
+test('首次创建：生成空 users.json', async () => {
   const dir = makeTempDir();
   const storage = new Storage(dir, { logger: silentLogger });
+  await storage.writeQueue; // 等待初始 save() 完成
   assert.equal(fs.existsSync(path.join(dir, 'users.json')), true);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'users.json'), 'utf8')), {});
   assert.deepEqual(storage.users, {});
 });
 
-test('getUser 创建默认用户并持久化', () => {
+test('getUser 创建默认用户并持久化', async () => {
   const dir = makeTempDir();
   const storage = new Storage(dir, { logger: silentLogger });
   const user = storage.getUser(123);
+  await storage.writeQueue; // 等待 save() 完成
   assert.equal(user.excludeSelf, true);
   assert.deepEqual(user.addresses, []);
   assert.equal(user.apiKey, '');
@@ -46,10 +48,11 @@ test('addAddress：合法地址成功，重复与非法被拒', () => {
   assert.equal(storage.users['1'].addresses.length, 1);
 });
 
-test('updateUser 持久化并可在重载后读取', () => {
+test('updateUser 持久化并可在重载后读取', async () => {
   const dir = makeTempDir();
   const storage = new Storage(dir, { logger: silentLogger });
   storage.updateUser(7, { usdtRate: 7.25, excludeSelf: false, apiKey: 'my-key-123456789012345' });
+  await storage.writeQueue; // 等待 save() 完成
   const reloaded = new Storage(dir, { logger: silentLogger });
   assert.equal(reloaded.users['7'].usdtRate, 7.25);
   assert.equal(reloaded.users['7'].excludeSelf, false);
@@ -131,13 +134,14 @@ test('归一化：历史数据兼容（缺字段回退默认，API Key 去括号
   assert.equal(storage.users['2'], undefined); // 非法条目被丢弃
 });
 
-test('save 安全阀：不允许用空对象覆盖已有数据', () => {
+test('save 安全阀：不允许用空对象覆盖已有数据', async () => {
   const dir = makeTempDir();
   const storage = new Storage(dir, { logger: silentLogger });
   storage.getUser(1);
-  assert.throws(() => {
+  await storage.writeQueue; // 等待初始 save() 完成
+  await assert.rejects(async () => {
     storage.users = {};
-    storage.save();
+    await storage.save();
   }, /将被清空/);
   // 文件仍保留原数据
   const raw = JSON.parse(fs.readFileSync(path.join(dir, 'users.json'), 'utf8'));
