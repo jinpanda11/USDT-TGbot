@@ -15,87 +15,9 @@ const { Logger, maskApiKey, maskUserId } = require('./logger');
 const { Semaphore, RateLimiter, QueryCache } = require('./query-gate');
 const { renderText, renderKeyboard } = require('./ad-renderer');
 const { registerAdAdmin } = require('./ad-admin');
-
-// 底部常驻按钮文案
-const BTN = {
-  QUERY_MONTH: '📥 查询本月',
-  PICK_MONTH: '📅 选择月份',
-  EXPORT_MONTH: '📄 导出本月',
-  ADDRESSES: '📋 地址管理',
-  ADD_ADDR: '➕ 添加地址',
-  TEMP_QUERY: '🔍 临时查询',
-  SETTINGS: '⚙️ 设置',
-  HELP: '❓ 帮助',
-  CANCEL: '❌ 取消',
-};
-
-// 其他固定文案
-const TEXT = {
-  MENU_BUTTON: '📋 菜单',
-  SPONSOR_LABEL: '📢赞助内容',
-};
-
-const MAIN_KEYBOARD = Markup.keyboard([
-  [BTN.QUERY_MONTH, BTN.PICK_MONTH],
-  [BTN.EXPORT_MONTH, BTN.ADDRESSES],
-  [BTN.TEMP_QUERY, BTN.ADD_ADDR],
-  [BTN.SETTINGS, BTN.HELP],
-]).resize();
-
-const CANCEL_KEYBOARD = Markup.keyboard([[BTN.CANCEL]]).resize();
-
-/**
- * 解析 /query 或 /export 的参数。
- * 返回 period：{ type: 'month', year, month } 或 { type: 'ytd', year }。
- * 'ytd' / '今年' 表示今年 1 月 1 日至今。
- */
-function parsePeriod(args, fallback) {
-  if (!args.length) return { type: 'month', year: fallback.year, month: fallback.month };
-  const first = String(args[0]).toLowerCase();
-  if (first === 'ytd' || first === '今年') {
-    return { type: 'ytd', year: fallback.year };
-  }
-  if (args.length === 1) {
-    const value = args[0];
-    if (/^\d{4}-\d{1,2}$/.test(value)) {
-      const [y, m] = value.split('-').map((part) => Number.parseInt(part, 10));
-      return { type: 'month', year: y, month: m };
-    }
-    const month = Number.parseInt(value, 10);
-    return { type: 'month', year: fallback.year, month };
-  }
-  return {
-    type: 'month',
-    year: Number.parseInt(args[0], 10),
-    month: Number.parseInt(args[1], 10),
-  };
-}
-
-function validateYearMonth(year, month) {
-  return (
-    Number.isInteger(year) &&
-    year >= 2000 &&
-    year <= 2100 &&
-    Number.isInteger(month) &&
-    month >= 1 &&
-    month <= 12
-  );
-}
-
-function normalizeApiKey(value) {
-  // 反复剥离首尾的 <> 与引号，直到稳定（兼容 <"KEY">、"<KEY>" 等组合）
-  let result = String(value ?? '').trim();
-  let previous;
-  do {
-    previous = result;
-    result = result.replace(/^<|>$/g, '').replace(/^["']|["']$/g, '');
-  } while (result !== previous);
-  return result.trim();
-}
-
-function monthLabel(year, month) {
-  return `${year}-${String(month).padStart(2, '0')}`;
-}
+const { BTN, TEXT, MAIN_KEYBOARD, CANCEL_KEYBOARD } = require('./keyboards');
+const { parsePeriod, validateYearMonth, normalizeApiKey, monthLabel } = require('./utils');
+const { SessionManager } = require('./session-manager');
 
 function createBot(config, storage, adService = null) {
   const bot = new Telegraf(config.telegramBotToken);
@@ -104,35 +26,17 @@ function createBot(config, storage, adService = null) {
   const querySemaphore = new Semaphore(config.globalQueryConcurrency);
   const rateLimiter = new RateLimiter(config.maxQueriesPerUserPerMin, 60000);
   const queryCache = new QueryCache(config.queryCacheTtlMs, 50);
-  /** @type {Map<number, { type: string, step?: string, data?: any, createdAt: number }>} */
-  const sessions = new Map();
-  const MAX_SESSIONS = 1000; // 会话上限，防止恶意用户无限开会话
+  const sessionManager = new SessionManager(config.sessionTtlMs, 10000);
+  sessionManager.start();
   
   // 汇率缓存：5分钟TTL，避免并发查询时重复请求 CoinGecko
   let cachedRate = null;
   let rateExpiry = 0;
   const RATE_CACHE_TTL = 300000; // 5分钟
 
-  // 会话过期清理
-  const sessionTimer = setInterval(() => {
-    if (config.sessionTtlMs <= 0) return;
-    const now = Date.now();
-    for (const [userId, session] of sessions) {
-      if (now - session.createdAt > config.sessionTtlMs) sessions.delete(userId);
-    }
-    // 超过上限时，清理最老的会话
-    if (sessions.size > MAX_SESSIONS) {
-      const sorted = Array.from(sessions.entries()).sort((a, b) => a[1].createdAt - b[1].createdAt);
-      const toDelete = sorted.slice(0, sessions.size - MAX_SESSIONS);
-      for (const [userId] of toDelete) {
-        sessions.delete(userId);
-      }
-    }
-  }, 60000);
-  sessionTimer.unref?.();
   const originalStop = bot.stop.bind(bot);
   bot.stop = async (reason) => {
-    clearInterval(sessionTimer);
+    sessionManager.stop();
     await originalStop(reason);
   };
 
@@ -173,21 +77,15 @@ function createBot(config, storage, adService = null) {
   }
 
   function clearSession(userId) {
-    sessions.delete(userId);
+    sessionManager.delete(userId);
   }
 
   function setSession(userId, session) {
-    sessions.set(userId, { ...session, createdAt: Date.now() });
+    sessionManager.set(userId, session);
   }
 
   function getSession(userId) {
-    const session = sessions.get(userId);
-    if (!session) return undefined;
-    if (config.sessionTtlMs > 0 && Date.now() - session.createdAt > config.sessionTtlMs) {
-      sessions.delete(userId);
-      return undefined;
-    }
-    return session;
+    return sessionManager.get(userId);
   }
 
   async function replyMain(ctx, text, extra = {}) {
