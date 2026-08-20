@@ -113,7 +113,7 @@ class Storage {
             continue;
           }
           const label = String(item.label || '默认标签').trim() || '默认标签';
-          const direction = item.direction === 'out' ? 'out' : 'in';
+          const direction = ['in', 'out', 'both'].includes(item.direction) ? item.direction : 'in';
           normalized.watchedAddresses.push({ address, label, direction });
         }
       }
@@ -244,9 +244,10 @@ class Storage {
     if (!isValidTronAddress(trimmed)) {
       return { ok: false, reason: 'invalid_address' };
     }
-    const dir = direction === 'out' ? 'out' : 'in';
+    const dir = ['out', 'both'].includes(direction) ? direction : 'in';
     const user = this.getUser(userId);
-    if (user.watchedAddresses.some((item) => item.address === trimmed && item.direction === dir)) {
+    const sameAddressExists = user.watchedAddresses.some((item) => item.address === trimmed);
+    if (sameAddressExists) {
       return { ok: false, reason: 'exists' };
     }
     user.watchedAddresses.push({ address: trimmed, label: label || '默认标签', direction: dir });

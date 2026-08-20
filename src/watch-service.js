@@ -4,7 +4,7 @@ const { fetchAllTransactions, formatUsdt, getCurrentChinaYearMonth } = require('
 const { maskAddress, maskUserId } = require('./logger');
 const { normalizeApiKey } = require('./utils');
 
-const DIRECTION_LABEL = { in: '到账', out: '转出' };
+const DIRECTION_LABEL = { both: '全部', in: '到账', out: '转出' };
 
 /**
  * 地址监听轮询服务。
@@ -82,30 +82,40 @@ class WatchService {
     }
     const base = this.config.trongridApiBase;
     const address = String(watch.address || '').trim();
-    const direction = watch.direction === 'out' ? 'out' : 'in';
+    const direction = watch.direction === 'both' ? 'both' : watch.direction === 'out' ? 'out' : 'in';
     const { year, month } = getCurrentChinaYearMonth();
     const start = Date.UTC(year, month - 1, 1, 0, 0, 0) - 8 * 60 * 60 * 1000;
     const end = Date.UTC(year, month + 0, 1, 0, 0, 0) - 8 * 60 * 60 * 1000;
-    const directionParam = direction === 'out' ? 'only_from' : 'only_to';
-    const params = new URLSearchParams({
-      contract_address: this.config.usdtContract,
-      only_confirmed: 'true',
-      [directionParam]: 'true',
-      limit: '200',
-      min_timestamp: String(start),
-      max_timestamp: String(end - 1),
-    });
-    const url = `${base}${encodeURIComponent(address)}/transactions/trc20?${params}`;
-    const { transactions, truncated } = await fetchAllTransactions(url, apiKey, {
-      timeout: this.config.requestTimeoutMs,
-      retries: this.config.maxRequestRetries,
-      maxPages: this.config.maxPagesPerAddress,
-    });
+    const queries =
+      direction === 'both'
+        ? [{ key: 'only_to', value: 'true' }, { key: 'only_from', value: 'true' }]
+        : [{ key: direction === 'out' ? 'only_from' : 'only_to', value: 'true' }];
+    const transactions = [];
+    let truncated = false;
+    for (const query of queries) {
+      const params = new URLSearchParams({
+        contract_address: this.config.usdtContract,
+        only_confirmed: 'true',
+        [query.key]: query.value,
+        limit: '200',
+        min_timestamp: String(start),
+        max_timestamp: String(end - 1),
+      });
+      const url = `${base}${encodeURIComponent(address)}/transactions/trc20?${params}`;
+      const res = await fetchAllTransactions(url, apiKey, {
+        timeout: this.config.requestTimeoutMs,
+        retries: this.config.maxRequestRetries,
+        maxPages: this.config.maxPagesPerAddress,
+      });
+      truncated = truncated || res.truncated;
+      transactions.push(...res.transactions);
+    }
     const result = transactions
       .filter((tx) => String(tx?.token_info?.address || '').toLowerCase() === String(this.config.usdtContract).toLowerCase())
       .filter((tx) => {
         if (direction === 'in') return String(tx?.to || '') === address;
-        return String(tx?.from || '') === address;
+        if (direction === 'out') return String(tx?.from || '') === address;
+        return String(tx?.to || '') === address || String(tx?.from || '') === address;
       })
       .sort((a, b) => Number(a.block_timestamp) - Number(b.block_timestamp))
       .map((tx) => {

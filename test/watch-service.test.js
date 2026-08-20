@@ -89,6 +89,31 @@ test('queryTransactions：监控到账只保留收款为该地址的交易', asy
   assert.equal(result.transactions.length, 1);
 });
 
+test('queryTransactions：both 同时查询到账和转出并合并', async () => {
+  const service = makeService();
+  service.storage.getUser(1).apiKey = 'test-key-123456789012345678901234';
+  const everUrls = [];
+  globalThis.fetch = async (url) => {
+    everUrls.push(url);
+    const fromA = makeTx({
+      transaction_id: 'from-a',
+      from: WALLET_A,
+      to: WALLET_B,
+    });
+    const toA = makeTx({ transaction_id: 'to-a', to: WALLET_A });
+    if (url.includes('only_from=true')) return jsonResponse({ data: [fromA], meta: {} });
+    return jsonResponse({ data: [toA], meta: {} });
+  };
+  const result = await service.queryTransactions(
+    1,
+    { address: WALLET_A, direction: 'both' },
+    undefined
+  );
+  assert.equal(result.transactions.length, 2);
+  assert.equal(everUrls.filter((url) => url.includes('only_from=true')).length, 1);
+  assert.equal(everUrls.filter((url) => url.includes('only_to=true')).length, 1);
+});
+
 test('poll：通知新交易，并写 checkpoint 防止重复通知', async () => {
   const service = makeService();
   service.storage.getUser(1).apiKey = 'test-key-123456789012345678901234';

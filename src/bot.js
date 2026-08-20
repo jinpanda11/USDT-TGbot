@@ -185,6 +185,12 @@ function createBot(config, storage, adService = null, externalWatchService = nul
     );
   }
 
+  function watchDirectionText(direction) {
+    if (direction === 'out') return '转出';
+    if (direction === 'both') return '全部';
+    return '到账';
+  }
+
   function watchKeyboard(user) {
     const rows = [];
     const watched = Array.isArray(user.watchedAddresses) ? user.watchedAddresses : [];
@@ -194,7 +200,7 @@ function createBot(config, storage, adService = null, externalWatchService = nul
       watched.forEach((item, index) => {
         rows.push([
           Markup.button.callback(
-            `🗑 ${index + 1}. ${item.label} · ${item.direction === 'out' ? '转出' : '到账'}`.slice(0, 60),
+            `🗑 ${index + 1}. ${item.label} · ${watchDirectionText(item.direction)}`.slice(0, 60),
             `wdel:${index + 1}`
           ),
         ]);
@@ -212,13 +218,14 @@ function createBot(config, storage, adService = null, externalWatchService = nul
     }
     const lines = watched.map(
       (item, index) =>
-        `${index + 1}. ${item.label} · ${item.direction === 'out' ? '转出' : '到账'}\n   ${item.address}`
+        `${index + 1}. ${item.label} · ${watchDirectionText(item.direction)}\n   ${item.address}`
     );
     return [`📡 地址监听（${watched.length}）`, ...lines, '', '点下面按钮可删除对应监听：'].join('\n');
   }
 
   function watchAddDirectionKeyboard() {
     return Markup.inlineKeyboard([
+      [Markup.button.callback('全部（到账+转出）', 'watch:dir:both')],
       [Markup.button.callback('⬇️ 到账', 'watch:dir:in'), Markup.button.callback('⬆️ 转出', 'watch:dir:out')],
       [Markup.button.callback('❌ 取消', 'nav:close')],
     ]);
@@ -277,7 +284,7 @@ async function saveWatchedAddress(ctx, address, label, direction) {
       }
       return;
     }
-    const dirText = direction === 'out' ? '转出' : '到账';
+    const dirText = watchDirectionText(direction);
     await replyMain(ctx, `✅ 已添加监听地址\n${address}\n标签：${label}\n方向：${dirText}\n\n之后到账/转出 USDT 会自动通知。`);
   }
 
@@ -748,7 +755,7 @@ async function saveWatchedAddress(ctx, address, label, direction) {
         await replyMain(ctx, '未找到该监听地址。');
         return;
       }
-      await replyMain(ctx, `已删除监听：${result.removed.label}\n${result.removed.address}（${result.removed.direction === 'out' ? '转出' : '到账'}）`);
+      await replyMain(ctx, `已删除监听：${result.removed.label}\n${result.removed.address}（${watchDirectionText(result.removed.direction)}）`);
       return;
     }
     await replyMain(ctx, '用法：/watch 查看监听；/watch add 添加监听；/watch del <序号或地址> 删除监听。');
@@ -1090,7 +1097,7 @@ async function saveWatchedAddress(ctx, address, label, direction) {
     const user = storage.getUser(ctx.from.id);
     try {
       await ctx.editMessageText(
-        `已删除监听：${result.removed.label}\n${result.removed.address}（${result.removed.direction === 'out' ? '转出' : '到账'}）\n\n${watchListText(user)}`,
+        `已删除监听：${result.removed.label}\n${result.removed.address}（${watchDirectionText(result.removed.direction)}）\n\n${watchListText(user)}`,
         watchKeyboard(user)
       );
     } catch {
@@ -1120,6 +1127,18 @@ async function saveWatchedAddress(ctx, address, label, direction) {
     }
     const { address, label } = session.data || {};
     await saveWatchedAddress(ctx, address, label, 'out');
+  });
+
+  bot.action('watch:dir:both', async (ctx) => {
+    await ctx.answerCbQuery('开始监听');
+    const session = getSession(ctx.from.id);
+    if (session?.type !== 'add_watch' || session.step !== 'direction') {
+      clearSession(ctx.from.id);
+      await ctx.reply('添加监听会话已过期，请重新发起。', MAIN_KEYBOARD);
+      return;
+    }
+    const { address, label } = session.data || {};
+    await saveWatchedAddress(ctx, address, label, 'both');
   });
 
   // ---------- 内联按钮 ----------

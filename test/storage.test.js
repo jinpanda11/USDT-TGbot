@@ -73,15 +73,26 @@ test('deleteAddress：支持序号与地址删除', () => {
   assert.equal(storage.deleteAddress(1, '9').ok, false);
 });
 
-test('addWatchedAddress：默认方向为到账，重复方向区分', () => {
+test('addWatchedAddress：默认方向为到账，同一地址只监听一项', () => {
   const dir = makeTempDir();
   const storage = new Storage(dir, { logger: silentLogger });
   assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A').ok, true);
   assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A').ok, false);
-  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A', 'out').ok, true);
   assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A', 'out').ok, false);
-  assert.equal(storage.users['1'].watchedAddresses.length, 2);
+  assert.equal(storage.users['1'].watchedAddresses.length, 1);
   assert.equal(storage.users['1'].watchedAddresses[0].direction, 'in');
+});
+
+test('addWatchedAddress：both 全方向监听与单方向互斥', () => {
+  const dir = makeTempDir();
+  const storage = new Storage(dir, { logger: silentLogger });
+  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A', 'both').ok, true);
+  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A', 'both').ok, false);
+  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A', 'in').ok, false);
+  assert.equal(storage.addWatchedAddress(1, WALLET_B, '钱包B', 'out').ok, true);
+  assert.equal(storage.addWatchedAddress(1, WALLET_B, '钱包B', 'both').ok, false);
+  assert.equal(storage.users['1'].watchedAddresses.length, 2);
+  assert.equal(storage.users['1'].watchedAddresses[0].direction, 'both');
   assert.equal(storage.users['1'].watchedAddresses[1].direction, 'out');
 });
 
