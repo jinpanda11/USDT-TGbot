@@ -231,6 +231,22 @@ function createBot(config, storage, adService = null, externalWatchService = nul
     ]);
   }
 
+  function watchImportKeyboard(user) {
+    const addresses = Array.isArray(user.addresses) ? user.addresses : [];
+    const rows = [];
+    addresses.slice(0, 20).forEach((item, index) => {
+      rows.push([
+        Markup.button.callback(
+          `📥 ${index + 1}. ${item.label}`.slice(0, 60),
+          `watch:import:${index + 1}`
+        ),
+      ]);
+    });
+    rows.push([Markup.button.callback('⌨️ 手动输入', 'watch:manual')]);
+    rows.push([Markup.button.callback('❌ 取消', 'nav:close')]);
+    return Markup.inlineKeyboard(rows);
+  }
+
   async function showWatch(ctx) {
     if (!assertPrivateChat(ctx)) return;
     const user = storage.getUser(ctx.from.id);
@@ -254,6 +270,23 @@ function createBot(config, storage, adService = null, externalWatchService = nul
           '也可以发送 clear 取消。',
         ].join('\n'),
         CANCEL_KEYBOARD
+      );
+      return;
+    }
+    const existingAddresses = Array.isArray(user.addresses) ? user.addresses : [];
+    if (existingAddresses.length) {
+      setSession(ctx.from.id, { type: 'add_watch', step: 'import' });
+      const lines = existingAddresses
+        .slice(0, 20)
+        .map((item, index) => `${index + 1}. ${item.label}\n   ${item.address}`);
+      await ctx.reply(
+        ['📡 添加监听地址', '', '已发现地址管理里的地址，可选择直接导入：', '', ...lines, '', '也可以「手动输入」其他地址。'].join(
+          '\n'
+        ),
+        {
+          ...MAIN_KEYBOARD,
+          ...watchImportKeyboard(user),
+        }
       );
       return;
     }
@@ -1103,6 +1136,53 @@ async function saveWatchedAddress(ctx, address, label, direction) {
     } catch {
       await showWatch(ctx);
     }
+  });
+
+  bot.action('watch:manual', async (ctx) => {
+    await ctx.answerCbQuery();
+    const session = getSession(ctx.from.id);
+    if (session?.type !== 'add_watch' || session.step !== 'import') {
+      clearSession(ctx.from.id);
+      await ctx.reply('请重新发起添加监听。', MAIN_KEYBOARD);
+      return;
+    }
+    setSession(ctx.from.id, { type: 'add_watch', step: 'address' });
+    await ctx.reply(
+      [
+        '📡 添加监听地址',
+        '',
+        '请发送 TRON 地址（T 开头，34 位），只监听 USDT。',
+        '也可以一行写：地址 标签',
+        '',
+        '点「❌ 取消」可退出。',
+      ].join('\n'),
+      CANCEL_KEYBOARD
+    );
+  });
+
+  bot.action(/^watch:import:(\d+)$/, async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
+    const index = Number.parseInt(ctx.match[1], 10) - 1;
+    const user = storage.getUser(ctx.from.id);
+    const addressItem = Array.isArray(user.addresses) ? user.addresses[index] : undefined;
+    const session = getSession(ctx.from.id);
+    if (!addressItem || session?.type !== 'add_watch' || session.step !== 'import') {
+      clearSession(ctx.from.id);
+      await ctx.reply('导入地址已过期或无效，请重新发起。', MAIN_KEYBOARD);
+      return;
+    }
+    setSession(ctx.from.id, {
+      type: 'add_watch',
+      step: 'direction',
+      data: { address: addressItem.address, label: addressItem.label },
+    });
+    await ctx.reply(
+      `✅ 已导入：${addressItem.label}\n${addressItem.address}\n\n请选择监听方向：`,
+      {
+        ...MAIN_KEYBOARD,
+        ...watchAddDirectionKeyboard(),
+      }
+    );
   });
 
   bot.action('watch:dir:in', async (ctx) => {
