@@ -9,6 +9,7 @@
 - 排除自有地址互转
 - USDT/CNY 汇率（默认 / 手动 / CoinGecko 实时）
 - 导出 CSV
+- 地址监听：设置个人 TronGrid API Key 后，可无限制添加监听地址，地址到账或转出 USDT 时自动发送 Telegram 通知
 - 按 Telegram 用户隔离数据（`data/users.json`）
 
 ## 界面
@@ -28,6 +29,7 @@
 | `/query [年] [月]` | 查询月收入（默认当月）；`/query ytd` 查今年 1 月 1 日至今 |
 | `/export [年] [月]` | 查询并导出 CSV；`/export ytd` 导出今年至今 |
 | `/temp [地址]` | 临时查询某地址（不加进地址管理）；无参数进入引导 |
+| `/watch` | 地址监听列表；`/watch add` 添加监听，`/watch del <序号或地址>` 删除监听 |
 | `/rate [值\|live\|clear]` | 汇率 |
 | `/exclude on\|off` | 排除自转开关 |
 
@@ -184,6 +186,7 @@ docker run --rm -v "$PWD/data:/app/data" --env-file .env \
 | `MAX_RECORDS_PER_QUERY` | 否 | 单次查询最大记录数，默认 `100000` |
 | `QUERY_TOTAL_TIMEOUT_MS` | 否 | 单次查询总超时，默认 `300000` |
 | `SESSION_TTL_MS` | 否 | 会话有效期，默认 `1800000`（30 分钟） |
+| `WATCH_POLL_INTERVAL_MS` | 否 | 地址监听轮询间隔，默认 `60000`（10 秒到 1 小时） |
 | `LOG_LEVEL` | 否 | 日志级别 `debug/info/warn/error`，默认 `info`（JSON 输出） |
 | `HEALTH_PORT` | 否 | 健康检查端口，默认 `0`（关闭） |
 | `ADS_ENABLED` | 否 | 广告总开关**初始默认值**，默认 `false`；运行中可在 TG `/ad_list` 顶部按钮切换 |
@@ -261,6 +264,7 @@ docker run --rm -v "$PWD/data:/app/data" --env-file .env \
 │   ├── config.js     # 配置解析与范围校验
 │   ├── logger.js     # 结构化 JSON 日志（含脱敏）
 │   ├── query-gate.js # 全局并发/限流/查询缓存
+│   ├── watch-service.js # 地址监听轮询与 Telegram 通知
 │   ├── ad-config.js  # 广告配置读取与校验
 │   ├── ad-service.js # 广告选择、曝光/点击记录
 │   └── ad-renderer.js# 广告文本与按钮渲染

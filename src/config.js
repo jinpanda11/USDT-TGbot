@@ -86,6 +86,7 @@ module.exports = {
   maxRecordsPerQuery: readInt('MAX_RECORDS_PER_QUERY', 100000, 1000, 500000),
   queryTotalTimeoutMs: readInt('QUERY_TOTAL_TIMEOUT_MS', 300000, 30000, 3600000),
   sessionTtlMs: readInt('SESSION_TTL_MS', 1800000, 60000, 86400000),
+  watchPollIntervalMs: readInt('WATCH_POLL_INTERVAL_MS', 60000, 10000, 3600000),
   logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),
   healthPort: readInt('HEALTH_PORT', 0, 0, 65535),
   // 广告（阶段 A：查询结果赞助位）

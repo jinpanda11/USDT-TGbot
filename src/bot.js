@@ -16,10 +16,11 @@ const { Semaphore, RateLimiter, QueryCache } = require('./query-gate');
 const { renderText, renderKeyboard } = require('./ad-renderer');
 const { registerAdAdmin } = require('./ad-admin');
 const { BTN, TEXT, MAIN_KEYBOARD, CANCEL_KEYBOARD } = require('./keyboards');
+const { WatchService } = require('./watch-service');
 const { parsePeriod, validateYearMonth, normalizeApiKey, monthLabel } = require('./utils');
 const { SessionManager } = require('./session-manager');
 
-function createBot(config, storage, adService = null) {
+function createBot(config, storage, adService = null, externalWatchService = null) {
   const bot = new Telegraf(config.telegramBotToken);
   const logger = new Logger(config.logLevel);
   const queryingUsers = new Set();
@@ -28,15 +29,26 @@ function createBot(config, storage, adService = null) {
   const queryCache = new QueryCache(config.queryCacheTtlMs, 50);
   const sessionManager = new SessionManager(config.sessionTtlMs, 10000);
   sessionManager.start();
-  
+
   // 汇率缓存：5分钟TTL，避免并发查询时重复请求 CoinGecko
   let cachedRate = null;
   let rateExpiry = 0;
   const RATE_CACHE_TTL = 300000; // 5分钟
 
+  const resolvedWatchService =
+    externalWatchService ||
+    new WatchService({
+      storage,
+      bot,
+      config,
+      logger,
+    });
+  bot.watchService = resolvedWatchService;
+
   const originalStop = bot.stop.bind(bot);
   bot.stop = async (reason) => {
     sessionManager.stop();
+    resolvedWatchService.stop();
     await originalStop(reason);
   };
 
@@ -170,6 +182,117 @@ function createBot(config, storage, adService = null) {
     );
     return [`📋 地址列表（${user.addresses.length}）`, ...lines, '', '点下面按钮可删除对应地址：'].join(
       '\n'
+    );
+  }
+
+  function watchKeyboard(user) {
+    const rows = [];
+    const watched = Array.isArray(user.watchedAddresses) ? user.watchedAddresses : [];
+    if (!watched.length) {
+      rows.push([Markup.button.callback('📡 添加监听地址', 'watch:add')]);
+    } else {
+      watched.forEach((item, index) => {
+        rows.push([
+          Markup.button.callback(
+            `🗑 ${index + 1}. ${item.label} · ${item.direction === 'out' ? '转出' : '到账'}`.slice(0, 60),
+            `wdel:${index + 1}`
+          ),
+        ]);
+      });
+      rows.push([Markup.button.callback('📡 添加监听地址', 'watch:add')]);
+    }
+    rows.push([Markup.button.callback('🔄 刷新', 'watch:refresh')]);
+    return Markup.inlineKeyboard(rows);
+  }
+
+  function watchListText(user) {
+    const watched = Array.isArray(user.watchedAddresses) ? user.watchedAddresses : [];
+    if (!watched.length) {
+      return '📡 地址监听\n\n尚未添加监听地址。\n监听需要先设置个人 TronGrid API Key，之后可无限制添加地址，到账/转出时会自动通知。';
+    }
+    const lines = watched.map(
+      (item, index) =>
+        `${index + 1}. ${item.label} · ${item.direction === 'out' ? '转出' : '到账'}\n   ${item.address}`
+    );
+    return [`📡 地址监听（${watched.length}）`, ...lines, '', '点下面按钮可删除对应监听：'].join('\n');
+  }
+
+  function watchAddDirectionKeyboard() {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('⬇️ 到账', 'watch:dir:in'), Markup.button.callback('⬆️ 转出', 'watch:dir:out')],
+      [Markup.button.callback('❌ 取消', 'nav:close')],
+    ]);
+  }
+
+  async function showWatch(ctx) {
+    if (!assertPrivateChat(ctx)) return;
+    const user = storage.getUser(ctx.from.id);
+    await ctx.reply(watchListText(user), {
+      ...MAIN_KEYBOARD,
+      ...watchKeyboard(user),
+    });
+  }
+
+  async function startAddWatch(ctx) {
+    if (!assertPrivateChat(ctx)) return;
+    const user = storage.getUser(ctx.from.id);
+    if (!normalizeApiKey(user.apiKey)) {
+      setSession(ctx.from.id, { type: 'watch_set_key' });
+      await ctx.reply(
+        [
+          '📡 地址监听需要 TronGrid API Key。',
+          '',
+          '请发送你的 TronGrid API Key，或直接点「🔑 去设置 API Key」后在「设置」里保存。',
+          '',
+          '也可以发送 clear 取消。',
+        ].join('\n'),
+        CANCEL_KEYBOARD
+      );
+      return;
+    }
+    setSession(ctx.from.id, { type: 'add_watch', step: 'address' });
+    await ctx.reply(
+      [
+        '📡 添加监听地址',
+        '',
+        '请发送 TRON 地址（T 开头，34 位），只监听 USDT。',
+        '也可以一行写：地址 标签',
+        '例如：',
+        'THpMhA9fLPdbPVFkxpGWcXxyEfsxd1bxeJ 钱包1',
+        '',
+        '点「❌ 取消」可退出。',
+      ].join('\n'),
+      CANCEL_KEYBOARD
+    );
+  }
+
+async function saveWatchedAddress(ctx, address, label, direction) {
+    const result = storage.addWatchedAddress(ctx.from.id, address, label, direction);
+    clearSession(ctx.from.id);
+    if (!result.ok) {
+      if (result.reason === 'invalid_address') {
+        await replyMain(ctx, '监听地址格式不对，已取消。');
+      } else {
+        await replyMain(ctx, '该监听地址已存在。');
+      }
+      return;
+    }
+    const dirText = direction === 'out' ? '转出' : '到账';
+    await replyMain(ctx, `✅ 已添加监听地址\n${address}\n标签：${label}\n方向：${dirText}\n\n之后到账/转出 USDT 会自动通知。`);
+  }
+
+  async function startAddWatchDirection(ctx, address, label) {
+    setSession(ctx.from.id, {
+      type: 'add_watch',
+      step: 'direction',
+      data: { address, label },
+    });
+    await ctx.reply(
+      `✅ 地址校验通过：${address}\n标签：${label}\n\n请选择监听方向：`,
+      {
+        ...MAIN_KEYBOARD,
+        ...watchAddDirectionKeyboard(),
+      }
     );
   }
 
@@ -345,7 +468,7 @@ function createBot(config, storage, adService = null) {
 
     const apiKey = normalizeApiKey(raw);
     if (apiKey.length < 20) {
-      await ctx.reply('API Key 看起来太短，请重新发送完整 Key，或点「❌ 取消」。', CANCEL_KEYBOARD);
+      await ctx.reply('API Key 看起来太短，请重新完整 /setkey <key>，或点「❌ 取消」。', CANCEL_KEYBOARD);
       return;
     }
 
@@ -606,6 +729,31 @@ function createBot(config, storage, adService = null) {
     await replyMain(ctx, helpText(Boolean(config.defaultTronGridApiKey)));
   });
 
+  bot.command('watch', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
+    const args = ctx.message.text.trim().split(/\s+/).slice(1).filter(Boolean);
+    if (!args.length) {
+      await showWatch(ctx);
+      return;
+    }
+    const first = args[0];
+    if (first === 'add') {
+      await startAddWatch(ctx);
+      return;
+    }
+    if (first === 'del' || first === 'delete') {
+      const target = args[1] || '';
+      const result = target ? storage.deleteWatchedAddress(ctx.from.id, target) : { ok: false };
+      if (!result.ok) {
+        await replyMain(ctx, '未找到该监听地址。');
+        return;
+      }
+      await replyMain(ctx, `已删除监听：${result.removed.label}\n${result.removed.address}（${result.removed.direction === 'out' ? '转出' : '到账'}）`);
+      return;
+    }
+    await replyMain(ctx, '用法：/watch 查看监听；/watch add 添加监听；/watch del <序号或地址> 删除监听。');
+  });
+
   bot.command('setkey', async (ctx) => {
     const raw = ctx.message.text.trim().split(/\s+/).slice(1).join(' ').trim();
     if (!raw) {
@@ -795,6 +943,11 @@ function createBot(config, storage, adService = null) {
     await showSettings(ctx);
   });
 
+  bot.hears(BTN.WATCH, async (ctx) => {
+    clearSession(ctx.from.id);
+    await showWatch(ctx);
+  });
+
   bot.hears(BTN.CANCEL, async (ctx) => {
     clearSession(ctx.from.id);
     await replyMain(ctx, '已取消，回到主菜单。');
@@ -865,6 +1018,23 @@ function createBot(config, storage, adService = null) {
       }
     }
 
+    if (session.type === 'watch_set_key') {
+      await saveApiKey(ctx, text);
+      return;
+    }
+
+    if (session.type === 'add_watch' && session.step === 'address') {
+      const parts = text.split(/\s+/);
+      const address = parts[0];
+      const labelFromLine = parts.slice(1).join(' ').trim() || '默认标签';
+      if (!isValidTronAddress(address)) {
+        await ctx.reply('地址格式不对（T 开头 34 位），或点「❌ 取消」。', CANCEL_KEYBOARD);
+        return;
+      }
+      await startAddWatchDirection(ctx, address, labelFromLine);
+      return;
+    }
+
     if (session.type === 'set_apikey') {
       await saveApiKey(ctx, text);
       return;
@@ -889,6 +1059,67 @@ function createBot(config, storage, adService = null) {
     }
 
     return next();
+  });
+
+  // ---------- 地址监听 ----------
+  bot.action('watch:refresh', async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
+    await ctx.answerCbQuery('已刷新');
+    const user = storage.getUser(ctx.from.id);
+    try {
+      await ctx.editMessageText(watchListText(user), watchKeyboard(user));
+    } catch {
+      await showWatch(ctx);
+    }
+  });
+
+  bot.action('watch:add', async (ctx) => {
+    await ctx.answerCbQuery();
+    await startAddWatch(ctx);
+  });
+
+  bot.action(/^wdel:(\d+)$/, async (ctx) => {
+    if (!assertPrivateChat(ctx)) return;
+    const index = ctx.match[1];
+    const result = storage.deleteWatchedAddress(ctx.from.id, index);
+    if (!result.ok) {
+      await ctx.answerCbQuery('未找到该监听');
+      return;
+    }
+    await ctx.answerCbQuery('已删除');
+    const user = storage.getUser(ctx.from.id);
+    try {
+      await ctx.editMessageText(
+        `已删除监听：${result.removed.label}\n${result.removed.address}（${result.removed.direction === 'out' ? '转出' : '到账'}）\n\n${watchListText(user)}`,
+        watchKeyboard(user)
+      );
+    } catch {
+      await showWatch(ctx);
+    }
+  });
+
+  bot.action('watch:dir:in', async (ctx) => {
+    await ctx.answerCbQuery('开始监听');
+    const session = getSession(ctx.from.id);
+    if (session?.type !== 'add_watch' || session.step !== 'direction') {
+      clearSession(ctx.from.id);
+      await ctx.reply('添加监听会话已过期，请重新发起。', MAIN_KEYBOARD);
+      return;
+    }
+    const { address, label } = session.data || {};
+    await saveWatchedAddress(ctx, address, label, 'in');
+  });
+
+  bot.action('watch:dir:out', async (ctx) => {
+    await ctx.answerCbQuery('开始监听');
+    const session = getSession(ctx.from.id);
+    if (session?.type !== 'add_watch' || session.step !== 'direction') {
+      clearSession(ctx.from.id);
+      await ctx.reply('添加监听会话已过期，请重新发起。', MAIN_KEYBOARD);
+      return;
+    }
+    const { address, label } = session.data || {};
+    await saveWatchedAddress(ctx, address, label, 'out');
   });
 
   // ---------- 内联按钮 ----------

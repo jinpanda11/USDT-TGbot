@@ -11,6 +11,7 @@ const BTN = {
   ADD_ADDR: '➕ 添加地址',
   TEMP_QUERY: '🔍 临时查询',
   SETTINGS: '⚙️ 设置',
+  WATCH: '📡 地址监听',
   HELP: '❓ 帮助',
   CANCEL: '❌ 取消',
 };
@@ -25,7 +26,8 @@ const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.QUERY_MONTH, BTN.PICK_MONTH],
   [BTN.EXPORT_MONTH, BTN.ADDRESSES],
   [BTN.TEMP_QUERY, BTN.ADD_ADDR],
-  [BTN.SETTINGS, BTN.HELP],
+  [BTN.SETTINGS, BTN.WATCH],
+  [BTN.HELP, BTN.CANCEL],
 ]).resize();
 
 const CANCEL_KEYBOARD = Markup.keyboard([[BTN.CANCEL]]).resize();

@@ -33,9 +33,11 @@ test('getUser 创建默认用户并持久化', async () => {
   await storage.writeQueue; // 等待 save() 完成
   assert.equal(user.excludeSelf, true);
   assert.deepEqual(user.addresses, []);
+  assert.deepEqual(user.watchedAddresses, []);
   assert.equal(user.apiKey, '');
   const reloaded = new Storage(dir, { logger: silentLogger });
   assert.equal(reloaded.users['123'].excludeSelf, true);
+  assert.deepEqual(reloaded.users['123'].watchedAddresses, []);
 });
 
 test('addAddress：合法地址成功，重复与非法被拒', () => {
@@ -69,6 +71,51 @@ test('deleteAddress：支持序号与地址删除', () => {
   assert.equal(storage.deleteAddress(1, WALLET_A).ok, true);
   assert.equal(storage.users['1'].addresses.length, 0);
   assert.equal(storage.deleteAddress(1, '9').ok, false);
+});
+
+test('addWatchedAddress：默认方向为到账，重复方向区分', () => {
+  const dir = makeTempDir();
+  const storage = new Storage(dir, { logger: silentLogger });
+  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A').ok, true);
+  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A').ok, false);
+  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A', 'out').ok, true);
+  assert.equal(storage.addWatchedAddress(1, WALLET_A, '钱包A', 'out').ok, false);
+  assert.equal(storage.users['1'].watchedAddresses.length, 2);
+  assert.equal(storage.users['1'].watchedAddresses[0].direction, 'in');
+  assert.equal(storage.users['1'].watchedAddresses[1].direction, 'out');
+});
+
+test('deleteWatchedAddress：支持序号与地址删除', () => {
+  const dir = makeTempDir();
+  const storage = new Storage(dir, { logger: silentLogger });
+  storage.addWatchedAddress(1, WALLET_A, 'A', 'in');
+  storage.addWatchedAddress(1, WALLET_B, 'B', 'out');
+  assert.equal(storage.deleteWatchedAddress(1, '2').ok, true);
+  assert.equal(storage.users['1'].watchedAddresses.length, 1);
+  assert.equal(storage.deleteWatchedAddress(1, WALLET_A).ok, true);
+  assert.equal(storage.users['1'].watchedAddresses.length, 0);
+  assert.equal(storage.deleteWatchedAddress(1, '9').ok, false);
+});
+
+test('归一化：历史监听字段兼容，非法监听地址被丢弃', () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(
+    path.join(dir, 'users.json'),
+    JSON.stringify({
+      '123': {
+        watchedAddresses: [
+          { address: WALLET_A, label: '好的' },
+          { address: 'bad-address', label: '坏的' },
+          null,
+        ],
+      },
+    }),
+    'utf8'
+  );
+  const storage = new Storage(dir, { logger: silentLogger });
+  assert.equal(storage.users['123'].watchedAddresses.length, 1);
+  assert.equal(storage.users['123'].watchedAddresses[0].label, '好的');
+  assert.equal(storage.users['123'].watchedAddresses[0].direction, 'in');
 });
 
 test('损坏 JSON：备份后抛错终止，不覆盖原文件', () => {

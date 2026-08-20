@@ -7,6 +7,7 @@ const { isValidTronAddress } = require('./trongrid');
 const DEFAULT_USER = {
   apiKey: '',
   addresses: [],
+  watchedAddresses: [],
   usdtRate: null,
   excludeSelf: true,
 };
@@ -75,7 +76,7 @@ class Storage {
         dropped += 1;
         continue;
       }
-      const normalized = { ...DEFAULT_USER, addresses: [] };
+      const normalized = { ...DEFAULT_USER, addresses: [], watchedAddresses: [] };
       if (typeof entry.apiKey === 'string') {
         normalized.apiKey = this.normalizeApiKey(entry.apiKey);
       }
@@ -98,6 +99,22 @@ class Storage {
           }
           const label = String(item.label || '默认标签').trim() || '默认标签';
           normalized.addresses.push({ address, label });
+        }
+      }
+      if (Array.isArray(entry.watchedAddresses)) {
+        for (const item of entry.watchedAddresses) {
+          if (!item || typeof item !== 'object') {
+            dropped += 1;
+            continue;
+          }
+          const address = String(item.address || '').trim();
+          if (!isValidTronAddress(address)) {
+            dropped += 1;
+            continue;
+          }
+          const label = String(item.label || '默认标签').trim() || '默认标签';
+          const direction = item.direction === 'out' ? 'out' : 'in';
+          normalized.watchedAddresses.push({ address, label, direction });
         }
       }
       users[key] = normalized;
@@ -155,11 +172,13 @@ class Storage {
       this.users[key] = {
         ...DEFAULT_USER,
         addresses: [],
+        watchedAddresses: [],
       };
       this.save();
     }
     const user = this.users[key];
     if (!Array.isArray(user.addresses)) user.addresses = [];
+    if (!Array.isArray(user.watchedAddresses)) user.watchedAddresses = [];
     if (typeof user.excludeSelf !== 'boolean') user.excludeSelf = true;
     if (typeof user.apiKey !== 'string') user.apiKey = '';
     // 兼容历史数据：去掉误存的 <> / 引号
@@ -216,6 +235,48 @@ class Storage {
     }
     const removed = user.addresses.find((item) => item.address === text);
     user.addresses = next;
+    this.save();
+    return { ok: true, removed };
+  }
+
+  addWatchedAddress(userId, address, label, direction) {
+    const trimmed = String(address || '').trim();
+    if (!isValidTronAddress(trimmed)) {
+      return { ok: false, reason: 'invalid_address' };
+    }
+    const dir = direction === 'out' ? 'out' : 'in';
+    const user = this.getUser(userId);
+    if (user.watchedAddresses.some((item) => item.address === trimmed && item.direction === dir)) {
+      return { ok: false, reason: 'exists' };
+    }
+    user.watchedAddresses.push({ address: trimmed, label: label || '默认标签', direction: dir });
+    this.save();
+    return { ok: true, user };
+  }
+
+  deleteWatchedAddress(userId, addressOrIndex) {
+    const user = this.getUser(userId);
+    const text = String(addressOrIndex).trim();
+    let next;
+
+    if (/^\d+$/.test(text)) {
+      const index = Number.parseInt(text, 10) - 1;
+      if (index < 0 || index >= user.watchedAddresses.length) {
+        return { ok: false, reason: 'not_found' };
+      }
+      const removed = user.watchedAddresses[index];
+      next = user.watchedAddresses.filter((_, i) => i !== index);
+      user.watchedAddresses = next;
+      this.save();
+      return { ok: true, removed };
+    }
+
+    next = user.watchedAddresses.filter((item) => item.address !== text);
+    if (next.length === user.watchedAddresses.length) {
+      return { ok: false, reason: 'not_found' };
+    }
+    const removed = user.watchedAddresses.find((item) => item.address === text);
+    user.watchedAddresses = next;
     this.save();
     return { ok: true, removed };
   }

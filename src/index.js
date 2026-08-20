@@ -18,6 +18,7 @@ async function main() {
     showRatio: config.adShowRatio,
   });
   const bot = createBot(config, storage, adService);
+  const watchService = bot.watchService;
 
   // 可选健康检查端口（HEALTH_PORT=0 时不启动）
   let healthServer;
@@ -78,6 +79,7 @@ async function main() {
 
   await bot.launch();
   logger.info('bot.launched', {});
+  watchService.start();
 
   // 设置「M」菜单按钮：命令收进输入框左侧的菜单，/start 或 /menu 才弹出按钮键盘
   try {
@@ -85,6 +87,7 @@ async function main() {
       { command: 'query', description: '查询本月收入' },
       { command: 'export', description: '导出本月 CSV' },
       { command: 'temp', description: '临时查询某地址' },
+      { command: 'watch', description: '地址监听' },
       { command: 'menu', description: '打开按钮菜单' },
       { command: 'list', description: '查看地址列表' },
       { command: 'add', description: '添加地址' },
