@@ -195,10 +195,11 @@ test('save 安全阀：不允许用空对象覆盖已有数据', async () => {
   assert.equal(raw['1'].excludeSelf, true);
 });
 
-test('文件权限：保存后为 0600（平台支持时）', () => {
+test('文件权限：保存后为 0600（平台支持时）', async () => {
   const dir = makeTempDir();
   const storage = new Storage(dir, { logger: silentLogger });
   storage.getUser(1);
+  await storage.writeQueue; // 等待 getUser 触发的 save() 完成
   if (process.platform !== 'win32') {
     const mode = fs.statSync(path.join(dir, 'users.json')).mode & 0o777;
     assert.equal(mode, 0o600);
